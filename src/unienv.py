@@ -421,7 +421,7 @@ def find_uv() -> str:
 
 def write_pyproject(packages: list[str]) -> None:
     PY_DIR.mkdir(parents=True, exist_ok=True)
-    deps = "".join(f'  "{p}",\n' for p in packages)
+    deps = "".join(f"  {json.dumps(p)},\n" for p in packages)
     # The env lives on one machine: resolve only for this platform. It is faster,
     # and it can't fail on wheels that only exist for other platforms.
     marker = f"sys_platform == '{sys.platform}' and platform_machine == '{platform.machine()}'"
