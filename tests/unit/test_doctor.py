@@ -72,6 +72,46 @@ class DoctorFixTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertIn("Applying safe fixes", stdout)
 
+    def test_invalid_mcp_json_warns_and_continues(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            root = Path(directory)
+            bad_cfg = root / "cursor.json"
+            bad_cfg.write_text('{"mcpServers": {},}\n')
+            manifest = root / "manifest.json"
+            manifest.write_text("{}")
+            for name, value in {
+                "HOME": root,
+                "UNIENV_HOME": root,
+                "PY_DIR": root / "py",
+                "MANIFEST_FILE": manifest,
+                "IS_MAC": False,
+            }.items():
+                stack.enter_context(patch.object(unienv, name, value))
+            for name, value in {
+                "load_recipes": {},
+                "load_state": {"options": {"exclude": []}},
+                "active_recipes": [],
+                "wanted": {"node": [], "bins": [], "skipped_bins": []},
+                "node_packages": {},
+                "agent_targets": [],
+                "mcp_clients": {"cursor": bad_cfg},
+                "brew_prefix": None,
+                "render_agent_block": "",
+                "_clean_shell_probe": str(unienv.BIN / "ue-py"),
+            }.items():
+                stack.enter_context(patch.object(unienv, name, return_value=value))
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = unienv.cmd_doctor(argparse.Namespace(json=True, fix=False, quiet_ok=False))
+
+        report = json.loads(stdout.getvalue())
+        mcp_checks = [c for c in report["checks"] if c["id"] == "mcp:cursor"]
+        self.assertEqual(len(mcp_checks), 1)
+        self.assertEqual(mcp_checks[0]["status"], "warn")
+        self.assertIn("not valid JSON", mcp_checks[0]["message"])
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(result, 1)  # Python dir missing, so doctor continued past invalid MCP JSON
+
 
 if __name__ == "__main__":
     unittest.main()
