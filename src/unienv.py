@@ -1120,8 +1120,14 @@ def cmd_doctor(args) -> int:
         except (json.JSONDecodeError, AttributeError):
             pass
 
-    if getattr(args, "fix", False) and any(c["status"] in ("fail", "warn") for c in checks):
-        info("Applying safe fixes: unienv sync")
+    sync_needed = any(
+        c["status"] in ("fail", "warn")
+        and (c["id"] == "manifest" or c["id"].startswith(("shell:", "agent:")))
+        for c in checks
+    )
+    if getattr(args, "fix", False) and sync_needed:
+        print("Applying safe fixes: unienv sync",
+              file=sys.stderr if args.json else sys.stdout, flush=True)
         do_sync(state, recipes_all, quiet=True)
         return cmd_doctor(argparse.Namespace(json=args.json, fix=False, quiet_ok=False))
     return _report(checks, args)
