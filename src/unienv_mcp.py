@@ -505,15 +505,24 @@ INSTRUCTIONS = (
 
 
 def _invalid_request(mid=None) -> dict:
-    return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32600, "message": "invalid request"}}
+    return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32600, "message": "Invalid Request"}}
+
+
+def _valid_id(val) -> bool:
+    return val is None or isinstance(val, str) or (isinstance(val, (int, float)) and not isinstance(val, bool))
 
 
 def handle(msg: dict) -> dict | None:
-    method, mid = msg.get("method"), msg.get("id")
-    if mid is None:  # notification (initialized, cancelled, ...): nothing to send back
-        return None
-    if not isinstance(method, str):
+    has_id = "id" in msg
+    raw_id = msg.get("id")
+    mid = raw_id if has_id and _valid_id(raw_id) else None
+    if msg.get("jsonrpc") != "2.0" or not isinstance(msg.get("method"), str):
         return _invalid_request(mid)
+    if has_id and not _valid_id(raw_id):
+        return _invalid_request(None)
+    if not has_id:  # notification (initialized, cancelled, ...): nothing to send back
+        return None
+    method = msg["method"]
 
     def ok(result):
         return {"jsonrpc": "2.0", "id": mid, "result": result}
@@ -582,9 +591,10 @@ def _safe_handle(msg) -> dict | None:
         return handle(msg)
     except Exception as e:
         log(f"internal error handling {msg.get('method')!r}: {type(e).__name__}: {e}")
-        mid = msg.get("id")
-        if mid is None:
+        if "id" not in msg:
             return None
+        raw_id = msg["id"]
+        mid = raw_id if _valid_id(raw_id) else None
         return {
             "jsonrpc": "2.0",
             "id": mid,

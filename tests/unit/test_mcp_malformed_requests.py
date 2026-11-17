@@ -105,7 +105,7 @@ class MalformedRequestTests(unittest.TestCase):
         self.assertEqual(
             lines[4],
             [
-                {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request"}},
+                {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}},
                 {"jsonrpc": "2.0", "id": 10, "result": {}},
             ],
         )
@@ -116,10 +116,45 @@ class MalformedRequestTests(unittest.TestCase):
         self.assertEqual(lines[6], [{"jsonrpc": "2.0", "id": 11, "result": {}}])
         # Malformed method type in request object
         self.assertEqual(
-            lines[7], [{"jsonrpc": "2.0", "id": 12, "error": {"code": -32600, "message": "invalid request"}}]
+            lines[7], [{"jsonrpc": "2.0", "id": 12, "error": {"code": -32600, "message": "Invalid Request"}}]
         )
         # Server still alive
         self.assertEqual(lines[8], {"jsonrpc": "2.0", "id": 13, "result": {}})
+
+    def test_jsonrpc_version_and_id_semantics(self):
+        msgs = [
+            '{"jsonrpc":"2.0","id":1,"method":"ping"}',
+            '{"jsonrpc":"2.0","id":"req-2","method":"ping"}',
+            '{"jsonrpc":"2.0","id":null,"method":"ping"}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"id":3,"method":"ping"}',
+            '{"jsonrpc":"1.0","id":4,"method":"ping"}',
+            '{"jsonrpc":2,"id":5,"method":"ping"}',
+            '{"jsonrpc":null,"id":6,"method":"ping"}',
+            '{"jsonrpc":"2.0","id":true,"method":"ping"}',
+            '{"jsonrpc":"2.0","id":7,"method":"ping"}',
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = subprocess.run(
+                [sys.executable, str(MCP_PATH)],
+                input="\n".join(msgs) + "\n",
+                capture_output=True,
+                text=True,
+                env={"HOME": tmp, "PATH": "/usr/bin:/bin", "UNIENV_HOME": f"{tmp}/.unienv"},
+                timeout=30,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        lines = [json.loads(line) for line in proc.stdout.splitlines()]
+        # 10 inputs, 1 notification -> 9 responses
+        self.assertEqual(len(lines), 9)
+        self.assertEqual(lines[0], {"jsonrpc": "2.0", "id": 1, "result": {}})
+        self.assertEqual(lines[1], {"jsonrpc": "2.0", "id": "req-2", "result": {}})
+        self.assertEqual(lines[2], {"jsonrpc": "2.0", "id": None, "result": {}})
+        for idx, expected_id in [(3, 3), (4, 4), (5, 5), (6, 6), (7, None)]:
+            self.assertEqual(lines[idx]["id"], expected_id)
+            self.assertEqual(lines[idx]["error"]["code"], -32600)
+            self.assertEqual(lines[idx]["error"]["message"], "Invalid Request")
+        self.assertEqual(lines[8], {"jsonrpc": "2.0", "id": 7, "result": {}})
 
 
 if __name__ == "__main__":
