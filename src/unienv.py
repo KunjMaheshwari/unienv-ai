@@ -1281,7 +1281,16 @@ def cmd_doctor(args) -> int:
         except (OSError, json.JSONDecodeError):
             add(f"mcp:{n}", "warn", f"{p} is not valid JSON; can't check the unienv entry")
             continue
-        if isinstance(data, dict) and "unienv" in (data.get("mcpServers") or {}):
+        if not isinstance(data, dict):
+            add(f"mcp:{n}", "warn", f"{p} is not a JSON object; can't check the unienv entry")
+            continue
+        servers = data.get("mcpServers")
+        if servers is None:
+            continue
+        if not isinstance(servers, dict):
+            add(f"mcp:{n}", "warn", f"{p} has invalid mcpServers (expected an object); can't check the unienv entry")
+            continue
+        if "unienv" in servers:
             configured.append(n)
     if configured:
         ok, detail, secs = mcp_handshake()
