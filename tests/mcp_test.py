@@ -73,6 +73,10 @@ msgs = [
     ),
     call(16, "convert_document", {"input_path": "two.pdf", "output_format": "png"}),
     call(17, "convert_document", {"input_path": "two.pdf", "output_format": "png"}),
+    {"jsonrpc": "2.0", "id": 18, "method": "tools/call", "params": "abc"},
+    {"jsonrpc": "2.0", "id": 19, "method": "tools/call", "params": {"name": ["x"]}},
+    {"jsonrpc": "2.0", "id": 20, "method": "tools/call", "params": {"name": "read_document", "arguments": 5}},
+    {"jsonrpc": "2.0", "id": 21, "method": "ping"},
 ]
 if HAS_SOFFICE:
     msgs.append(call(12, "convert_document", {"input_path": "t.docx", "output_format": "pdf"}))
@@ -129,6 +133,10 @@ check("run_tool refuses non-UniEnv tools", is_error(7) and "not a UniEnv tool" i
 check("run_python reports failures as tool errors", is_error(8) and "exit code: 3" in text(8))
 check("install_package rejects shell metacharacters", is_error(9) and "invalid package name" in text(9))
 check("unknown tool is a JSON-RPC error", replies[10].get("error", {}).get("code") == -32602)
+check("malformed params returns -32602", replies[18].get("error", {}).get("code") == -32602)
+check("unhashable tool name returns -32602", replies[19].get("error", {}).get("code") == -32602)
+check("non-dict arguments returns -32602", replies[20].get("error", {}).get("code") == -32602)
+check("server stays alive after malformed requests", replies[21].get("result") == {})
 check("install_package rejects smuggled flags (-y)", is_error(13) and "invalid package name" in text(13))
 check("install_package rejects smuggled flags (--cask)", is_error(14) and "invalid package name" in text(14))
 renders = sorted(WORK.glob("two-pages*"))

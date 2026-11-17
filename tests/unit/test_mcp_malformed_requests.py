@@ -1,0 +1,78 @@
+"""Unit tests for malformed JSON-RPC requests in unienv_mcp."""
+
+import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).parents[2]
+MCP_PATH = ROOT / "src" / "unienv_mcp.py"
+spec = importlib.util.spec_from_file_location("unienv_mcp", MCP_PATH)
+mcp = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mcp)
+
+
+class MalformedRequestTests(unittest.TestCase):
+    def test_non_dict_params_returns_invalid_params(self):
+        for bad_params in ("abc", 123, ["x"]):
+            with self.subTest(params=bad_params):
+                reply = mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": bad_params})
+                self.assertEqual(reply["error"]["code"], -32602)
+
+    def test_non_str_tool_name_returns_invalid_params(self):
+        for bad_name in (["x"], 42, None, {"a": 1}):
+            with self.subTest(name=bad_name):
+                reply = mcp.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": bad_name}})
+                self.assertEqual(reply["error"]["code"], -32602)
+
+    def test_non_dict_arguments_returns_invalid_params(self):
+        for bad_args in (5, "abc", ["a"]):
+            with self.subTest(arguments=bad_args):
+                reply = mcp.handle(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {"name": "read_document", "arguments": bad_args},
+                    }
+                )
+                self.assertEqual(reply["error"]["code"], -32602)
+
+    def test_safe_handle_catches_unexpected_errors(self):
+        with patch.object(mcp, "handle", side_effect=RuntimeError("boom")):
+            reply = mcp._safe_handle({"jsonrpc": "2.0", "id": 4, "method": "ping"})
+        self.assertEqual(reply["error"]["code"], -32603)
+        self.assertEqual(reply["id"], 4)
+
+    def test_stdio_server_survives_malformed_and_lone_surrogate_requests(self):
+        msgs = [
+            '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":"abc"}',
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":["x"]}}',
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_document","arguments":5}}',
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_document","arguments":{"path":"\\ud800"}}}',
+            '{"jsonrpc":"2.0","id":5,"method":"ping"}',
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = subprocess.run(
+                [sys.executable, str(MCP_PATH)],
+                input="\n".join(msgs) + "\n",
+                capture_output=True,
+                text=True,
+                env={"HOME": tmp, "PATH": "/usr/bin:/bin", "UNIENV_HOME": f"{tmp}/.unienv"},
+                timeout=30,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        replies = {m["id"]: m for m in map(json.loads, proc.stdout.splitlines())}
+        self.assertEqual(replies[1]["error"]["code"], -32602)
+        self.assertEqual(replies[2]["error"]["code"], -32602)
+        self.assertEqual(replies[3]["error"]["code"], -32602)
+        self.assertTrue(replies[4]["result"]["isError"])
+        self.assertEqual(replies[5]["result"], {})
+
+
+if __name__ == "__main__":
+    unittest.main()
