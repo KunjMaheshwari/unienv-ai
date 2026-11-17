@@ -35,7 +35,27 @@ UNIENV_HOME = Path(os.environ.get("UNIENV_HOME", HOME / ".unienv")).expanduser()
 BIN = UNIENV_HOME / "bin"
 MANIFEST_FILE = UNIENV_HOME / "manifest.json"
 RECIPES_DIR = Path(__file__).resolve().parent.parent / "recipes"
-WORKDIR = Path(os.environ.get("UNIENV_WORKDIR", HOME / "UniEnv")).expanduser()
+
+
+def resolve_workdir(raw: str | None = None, *, home: Path | None = None) -> Path:
+    """Resolve UNIENV_WORKDIR safely against home.
+
+    Unset, empty, or whitespace-only values default to ``home / "UniEnv"``.
+    Relative paths resolve relative to ``home`` instead of the process cwd
+    (which GUI MCP hosts often set to ``/``).
+    """
+    base = (home or HOME).expanduser()
+    value = (os.environ.get("UNIENV_WORKDIR") if raw is None else raw) or ""
+    value = value.strip()
+    if not value:
+        return (base / "UniEnv").resolve()
+    p = Path(value).expanduser()
+    if not p.is_absolute():
+        p = base / p
+    return p.resolve()
+
+
+WORKDIR = resolve_workdir()
 
 MAX_OUTPUT = 20_000  # characters of tool output returned to the model
 DEFAULT_TIMEOUT = 120
@@ -553,6 +573,7 @@ def handle(msg: dict) -> dict | None:
 
 
 def serve() -> int:
+    WORKDIR.mkdir(parents=True, exist_ok=True)
     log(f"started (UniEnv home {UNIENV_HOME}, working folder {WORKDIR})")
     for line in sys.stdin:
         line = line.strip()
