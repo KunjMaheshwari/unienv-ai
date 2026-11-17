@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-spec = importlib.util.spec_from_file_location("unienv", Path(__file__).parents[1] / "src/unienv.py")
+spec = importlib.util.spec_from_file_location("unienv", Path(__file__).parents[2] / "src/unienv.py")
 unienv = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(unienv)
 
