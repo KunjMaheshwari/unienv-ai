@@ -196,7 +196,7 @@ def platform_key() -> str:
 
 def upsert_block(path: Path, body: str, begin: str, end: str, *, top: bool = False) -> bool:
     """Insert or replace a marked block. Returns True if the file changed."""
-    old = path.read_text() if path.exists() else ""
+    old = path.read_text(encoding="utf-8", errors="surrogateescape") if path.exists() else ""
     block = f"{begin}\n{body.rstrip()}\n{end}\n"
     pattern = re.compile(re.escape(begin) + r".*?" + re.escape(end) + r"\n?", re.S)
     if pattern.search(old):
@@ -208,19 +208,19 @@ def upsert_block(path: Path, body: str, begin: str, end: str, *, top: bool = Fal
     if new == old:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(new)
+    path.write_text(new, encoding="utf-8", errors="surrogateescape")
     return True
 
 
 def remove_block(path: Path, begin: str, end: str) -> bool:
     if not path.exists():
         return False
-    old = path.read_text()
+    old = path.read_text(encoding="utf-8", errors="surrogateescape")
     new = re.sub(r"\n?" + re.escape(begin) + r".*?" + re.escape(end) + r"\n?", "\n", old, flags=re.S)
     new = new.strip("\n") + ("\n" if new.strip() else "")
     if new == old:
         return False
-    path.write_text(new)
+    path.write_text(new, encoding="utf-8", errors="surrogateescape")
     return True
 
 
@@ -252,7 +252,11 @@ def state_lock():
 def read_block(path: Path, begin: str, end: str) -> str | None:
     if not path.exists():
         return None
-    m = re.search(re.escape(begin) + r"\n(.*?)\n" + re.escape(end), path.read_text(), re.S)
+    try:
+        text = path.read_text(encoding="utf-8", errors="surrogateescape")
+    except OSError:
+        return None
+    m = re.search(re.escape(begin) + r"\n(.*?)\n" + re.escape(end), text, re.S)
     return m.group(1) if m else None
 
 
@@ -682,11 +686,15 @@ def sync_agents(manifest: dict, recipes: list[dict], *, only_detected: bool = Tr
     for a in agent_targets():
         if only_detected and not detected(a):
             continue
-        upsert_block(a["instructions"], block, MD_BEGIN, MD_END)
-        if a["skills"] is not None:
-            d = a["skills"] / "unienv"
-            d.mkdir(parents=True, exist_ok=True)
-            (d / "SKILL.md").write_text(skill)
+        try:
+            upsert_block(a["instructions"], block, MD_BEGIN, MD_END)
+            if a["skills"] is not None:
+                d = a["skills"] / "unienv"
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "SKILL.md").write_text(skill, encoding="utf-8")
+        except OSError as e:
+            warn(f"could not update {a['instructions']} ({e}); copy {AGENTS_COPY} manually")
+            continue
         done.append(a["name"])
     return done
 
@@ -699,8 +707,11 @@ def wire_shells() -> list[str]:
         # (login bash reads .bash_profile or .bash_login *instead of* .profile when present)
         if rc.name not in (".zshenv", ".profile") and not rc.exists():
             continue
-        if upsert_block(rc, body, SHELL_BEGIN, SHELL_END):
-            changed.append(str(rc).replace(str(HOME), "~"))
+        try:
+            if upsert_block(rc, body, SHELL_BEGIN, SHELL_END):
+                changed.append(str(rc).replace(str(HOME), "~"))
+        except OSError as e:
+            warn(f"could not update {rc} ({e}); add `source {ENV_SH}` yourself")
     return changed
 
 
@@ -1423,14 +1434,23 @@ def cmd_wire(args) -> int:
 
 def cmd_uninstall(args) -> int:
     for rc in SHELL_FILES:
-        if remove_block(rc, SHELL_BEGIN, SHELL_END):
-            info(f"  removed block from {rc}")
+        try:
+            if remove_block(rc, SHELL_BEGIN, SHELL_END):
+                info(f"  removed block from {rc}")
+        except OSError as e:
+            warn(f"could not update {rc} ({e}); remove the UniEnv block manually")
     for a in agent_targets():
-        if remove_block(a["instructions"], MD_BEGIN, MD_END):
-            info(f"  removed block from {a['instructions']}")
+        try:
+            if remove_block(a["instructions"], MD_BEGIN, MD_END):
+                info(f"  removed block from {a['instructions']}")
+        except OSError as e:
+            warn(f"could not update {a['instructions']} ({e}); remove the UniEnv block manually")
         if a["skills"] is not None and (a["skills"] / "unienv").exists():
-            shutil.rmtree(a["skills"] / "unienv")
-            info(f"  removed {a['skills'] / 'unienv'}")
+            try:
+                shutil.rmtree(a["skills"] / "unienv")
+                info(f"  removed {a['skills'] / 'unienv'}")
+            except OSError as e:
+                warn(f"could not remove {a['skills'] / 'unienv'} ({e})")
     # desktop apps would otherwise keep trying to start a server that no longer exists
     for name, path in mcp_clients().items():
         try:
