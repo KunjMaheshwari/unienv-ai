@@ -504,10 +504,16 @@ INSTRUCTIONS = (
 # ── JSON-RPC / MCP plumbing ─────────────────────────────────────────────────
 
 
+def _invalid_request(mid=None) -> dict:
+    return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32600, "message": "invalid request"}}
+
+
 def handle(msg: dict) -> dict | None:
     method, mid = msg.get("method"), msg.get("id")
     if mid is None:  # notification (initialized, cancelled, ...): nothing to send back
         return None
+    if not isinstance(method, str):
+        return _invalid_request(mid)
 
     def ok(result):
         return {"jsonrpc": "2.0", "id": mid, "result": result}
@@ -569,7 +575,9 @@ def handle(msg: dict) -> dict | None:
     return error(-32601, f"method not found: {method}")
 
 
-def _safe_handle(msg: dict) -> dict | None:
+def _safe_handle(msg) -> dict | None:
+    if not isinstance(msg, dict):
+        return _invalid_request()
     try:
         return handle(msg)
     except Exception as e:
@@ -595,9 +603,14 @@ def serve() -> int:
         except json.JSONDecodeError:
             reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}
         else:
-            batch = msg if isinstance(msg, list) else [msg]
-            replies = [r for r in (_safe_handle(m) for m in batch if isinstance(m, dict)) if r]
-            reply = replies if isinstance(msg, list) else (replies[0] if replies else None)
+            if isinstance(msg, list):
+                if not msg:
+                    reply = _invalid_request()
+                else:
+                    replies = [r for r in (_safe_handle(m) for m in msg) if r is not None]
+                    reply = replies or None
+            else:
+                reply = _safe_handle(msg)
         if reply:
             sys.stdout.write(json.dumps(reply, ensure_ascii=True) + "\n")
             sys.stdout.flush()

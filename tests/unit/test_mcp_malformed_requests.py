@@ -73,6 +73,54 @@ class MalformedRequestTests(unittest.TestCase):
         self.assertTrue(replies[4]["result"]["isError"])
         self.assertEqual(replies[5]["result"], {})
 
+    def test_stdio_server_handles_top_level_non_objects_and_invalid_batches(self):
+        msgs = [
+            "42",
+            '"hello"',
+            "null",
+            "[]",
+            '[1, {"jsonrpc":"2.0","id":10,"method":"ping"}]',
+            '[1, "bad", null]',
+            '[{"jsonrpc":"2.0","method":"notifications/initialized"},{"jsonrpc":"2.0","id":11,"method":"ping"}]',
+            '[{"jsonrpc":"2.0","id":12,"method":123}]',
+            '{"jsonrpc":"2.0","id":13,"method":"ping"}',
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = subprocess.run(
+                [sys.executable, str(MCP_PATH)],
+                input="\n".join(msgs) + "\n",
+                capture_output=True,
+                text=True,
+                env={"HOME": tmp, "PATH": "/usr/bin:/bin", "UNIENV_HOME": f"{tmp}/.unienv"},
+                timeout=30,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        lines = [json.loads(line) for line in proc.stdout.splitlines()]
+        self.assertEqual(len(lines), 9)
+        for idx in (0, 1, 2, 3):
+            self.assertIsNone(lines[idx]["id"])
+            self.assertEqual(lines[idx]["error"]["code"], -32600)
+
+        # Batch with invalid scalar + valid ping
+        self.assertEqual(
+            lines[4],
+            [
+                {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request"}},
+                {"jsonrpc": "2.0", "id": 10, "result": {}},
+            ],
+        )
+        # Batch with multiple invalid entries
+        self.assertEqual(len(lines[5]), 3)
+        self.assertTrue(all(item["error"]["code"] == -32600 and item["id"] is None for item in lines[5]))
+        # Batch with valid notification + valid request (notification produces no reply)
+        self.assertEqual(lines[6], [{"jsonrpc": "2.0", "id": 11, "result": {}}])
+        # Malformed method type in request object
+        self.assertEqual(
+            lines[7], [{"jsonrpc": "2.0", "id": 12, "error": {"code": -32600, "message": "invalid request"}}]
+        )
+        # Server still alive
+        self.assertEqual(lines[8], {"jsonrpc": "2.0", "id": 13, "result": {}})
+
 
 if __name__ == "__main__":
     unittest.main()
