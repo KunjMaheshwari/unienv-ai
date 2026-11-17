@@ -63,18 +63,46 @@ def log(msg: str) -> None:
 # ── environment ─────────────────────────────────────────────────────────────
 
 
+_PASSTHROUGH_EXACT = {
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "SHELL",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "TESSDATA_PREFIX",
+}
+_PASSTHROUGH_PREFIXES = ("UV_", "HOMEBREW_", "UNIENV_")
+
+
 def tool_env() -> dict[str, str]:
     """Environment for child processes: UniEnv + Homebrew + system PATH.
 
     GUI apps start MCP servers with launchd's minimal PATH, so build it here
-    instead of relying on shell startup files.
+    instead of relying on shell startup files. Only an explicit allowlist of
+    identity, proxy, CA, package-tool, and UniEnv variables passes through so
+    unrelated secrets in the host environment never leak to child processes.
     """
     path = [str(BIN)]
     for p in ("/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin"):
         if Path(p).is_dir():
             path.append(p)
     path += ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-    env = {k: v for k, v in os.environ.items() if k in ("HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "SHELL")}
+    env = {k: v for k, v in os.environ.items() if k in _PASSTHROUGH_EXACT or k.startswith(_PASSTHROUGH_PREFIXES)}
     env.update(
         {"PATH": os.pathsep.join(path), "UNIENV_HOME": str(UNIENV_HOME), "PYTHONUNBUFFERED": "1", "MPLBACKEND": "Agg"}
     )
