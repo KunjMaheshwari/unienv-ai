@@ -17,11 +17,11 @@ Everything below is already installed and shared by every AI tool on this machin
 
 ## When something is missing
 
-- Python package: `unienv need <package>`
-- Node package: `unienv need --node <package>`
-- System tool: `unienv need --bin <homebrew-formula>` (or `--cask` for apps)
+- Python package: `{{BIN}}/unienv need <package>`
+- Node package: `{{BIN}}/unienv need --node <package>`
+- System tool: `{{BIN}}/unienv need --bin <homebrew-formula>` (or `--cask` for apps)
 
-These install permanently, update `{{HOME_DIR}}/manifest.json`, and make the tool available to every AI tool on this machine. If a tool fails, run `unienv doctor --json` and follow its `fix` hints.
+These install permanently, update `{{HOME_DIR}}/manifest.json`, and make the tool available to every AI tool on this machine. If a tool fails, run `{{BIN}}/unienv doctor --json` and follow its `fix` hints.
 
 ## Python packages installed
 

@@ -6,11 +6,11 @@ This machine has a persistent, pre-installed environment for ad-hoc work (docume
 - Node.js with batteries: `ue-node` (absolute path: `{{BIN}}/ue-node`); preinstalled: {{NODE_PACKAGES}}
 - System tools: {{TOOLS}}
 - Python packages: {{PY_PACKAGES}}
-- Full machine-readable list: `{{HOME_DIR}}/manifest.json`, or run `unienv list`
+- Full machine-readable list: `{{HOME_DIR}}/manifest.json`, or run `{{BIN}}/unienv list`
 
 Rules:
 1. Inside a project that has its own environment (`pyproject.toml`, `.venv`, `package.json`), use that project's environment (`uv run`, `.venv/bin/python`, npm). UniEnv is for work outside projects.
 2. Never create throwaway venvs for one-off tasks, and never use `pip install --user` or `--break-system-packages`.
-3. If something is missing, install it permanently for every AI tool: `unienv need <python-package>`, `unienv need --node <package>`, `unienv need --bin <homebrew-formula>` or `unienv need --cask <homebrew-cask>`.
-4. If a tool seems broken or missing, run `unienv doctor --json` before reinstalling anything.
+3. If something is missing, install it permanently for every AI tool: `{{BIN}}/unienv need <python-package>`, `{{BIN}}/unienv need --node <package>`, `{{BIN}}/unienv need --bin <homebrew-formula>` or `{{BIN}}/unienv need --cask <homebrew-cask>`.
+4. If a tool seems broken or missing, run `{{BIN}}/unienv doctor --json` before reinstalling anything.
 5. Use `soffice-safe` instead of `soffice` or `libreoffice`.
