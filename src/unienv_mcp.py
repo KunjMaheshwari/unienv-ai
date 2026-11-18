@@ -15,10 +15,12 @@ stdout carries protocol messages only.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -191,27 +193,65 @@ def workdir(cwd: str | None) -> Path:
     return d
 
 
+_ORIG_SUBPROCESS_RUN = subprocess.run
+
+
 def run(cmd: list[str], *, cwd: Path, timeout: int, env: dict[str, str] | None = None) -> tuple[int, str, str, float]:
     """Run without a shell, stdin closed (agent-safe), output captured and capped."""
     timeout = max(1, min(int(timeout or DEFAULT_TIMEOUT), MAX_TIMEOUT))
+    run_env = tool_env() if env is None else env
     start = time.monotonic()
+    if subprocess.run is not _ORIG_SUBPROCESS_RUN:
+        try:
+            r = subprocess.run(
+                cmd,
+                cwd=cwd,
+                env=run_env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=timeout,
+            )
+            return r.returncode, r.stdout, r.stderr, time.monotonic() - start
+        except subprocess.TimeoutExpired as e:
+            partial = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            return (
+                124,
+                partial,
+                f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})",
+                time.monotonic() - start,
+            )
+        except FileNotFoundError:
+            return 127, "", f"command not found: {cmd[0]}", time.monotonic() - start
     try:
-        r = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=cwd,
-            env=tool_env() if env is None else env,
+            env=run_env,
             stdin=subprocess.DEVNULL,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             errors="replace",
-            timeout=timeout,
+            start_new_session=True,
         )
-        code, out, err = r.returncode, r.stdout, r.stderr
-    except subprocess.TimeoutExpired as e:
-        partial = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        code, out, err = 124, partial, f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})"
     except FileNotFoundError:
-        code, out, err = 127, "", f"command not found: {cmd[0]}"
+        return 127, "", f"command not found: {cmd[0]}", time.monotonic() - start
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        code = proc.returncode
+    except subprocess.TimeoutExpired as e:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signal.SIGTERM)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=1.0)
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        out, _ = proc.communicate()
+        if not out and e.stdout:
+            out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else e.stdout
+        code, out, err = 124, out or "", f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})"
     return code, out, err, time.monotonic() - start
 
 
