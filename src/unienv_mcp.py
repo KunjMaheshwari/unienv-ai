@@ -63,18 +63,69 @@ def log(msg: str) -> None:
 # ── environment ─────────────────────────────────────────────────────────────
 
 
+_TOOL_ENV_ALLOWLIST = {
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "SHELL",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+    "UNIENV_HOME",
+    "UNIENV_WORKDIR",
+    "UNIENV_SOFFICE",
+    "TESSDATA_PREFIX",
+}
+
+_INSTALL_ENV_ALLOWLIST = {
+    "UV_INDEX_URL",
+    "UV_EXTRA_INDEX_URL",
+    "UV_DEFAULT_INDEX",
+    "UV_INDEX",
+    "UV_NATIVE_TLS",
+    "UV_ALLOW_INSECURE_HOST",
+    "UV_NO_CACHE",
+    "UV_CACHE_DIR",
+    "UV_PYTHON_INSTALL_MIRROR",
+    "UV_OFFLINE",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "PIP_TRUSTED_HOST",
+    "PIP_CERT",
+    "HOMEBREW_NO_AUTO_UPDATE",
+    "HOMEBREW_NO_ENV_HINTS",
+    "HOMEBREW_NO_INSTALL_CLEANUP",
+    "HOMEBREW_API_DOMAIN",
+    "HOMEBREW_BOTTLE_DOMAIN",
+    "HOMEBREW_PIP_INDEX_URL",
+}
+
+
 def tool_env() -> dict[str, str]:
     """Environment for child processes: UniEnv + Homebrew + system PATH.
 
     GUI apps start MCP servers with launchd's minimal PATH, so build it here
-    instead of relying on shell startup files.
+    instead of relying on shell startup files. Only an explicit allowlist of
+    identity, proxy, CA, and UniEnv variables passes through so host secrets
+    and package-publishing credentials never leak to arbitrary tool runs.
     """
     path = [str(BIN)]
     for p in ("/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin"):
         if Path(p).is_dir():
             path.append(p)
     path += ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-    env = {k: v for k, v in os.environ.items() if k in ("HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "SHELL")}
+    env = {k: v for k, v in os.environ.items() if k in _TOOL_ENV_ALLOWLIST}
     env.update(
         {"PATH": os.pathsep.join(path), "UNIENV_HOME": str(UNIENV_HOME), "PYTHONUNBUFFERED": "1", "MPLBACKEND": "Agg"}
     )
@@ -82,6 +133,15 @@ def tool_env() -> dict[str, str]:
     if sys.platform == "darwin" and (tmp == "/tmp" or tmp.startswith("/tmp/")):
         tmp = "/private" + tmp  # Leptonica rewrites /tmp paths (see env.sh)
     env["TMPDIR"] = tmp
+    return env
+
+
+def install_env() -> dict[str, str]:
+    """Environment for install_package: tool_env plus package-index and safe Homebrew settings."""
+    env = tool_env()
+    for k in _INSTALL_ENV_ALLOWLIST:
+        if k in os.environ:
+            env[k] = os.environ[k]
     return env
 
 
@@ -107,7 +167,7 @@ def workdir(cwd: str | None) -> Path:
     return d
 
 
-def run(cmd: list[str], *, cwd: Path, timeout: int) -> tuple[int, str, str, float]:
+def run(cmd: list[str], *, cwd: Path, timeout: int, env: dict[str, str] | None = None) -> tuple[int, str, str, float]:
     """Run without a shell, stdin closed (agent-safe), output captured and capped."""
     timeout = max(1, min(int(timeout or DEFAULT_TIMEOUT), MAX_TIMEOUT))
     start = time.monotonic()
@@ -115,7 +175,7 @@ def run(cmd: list[str], *, cwd: Path, timeout: int) -> tuple[int, str, str, floa
         r = subprocess.run(
             cmd,
             cwd=cwd,
-            env=tool_env(),
+            env=tool_env() if env is None else env,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -353,7 +413,9 @@ def t_install_package(a: dict) -> str:
     # CLI flags such as -y (non-interactive sudo) or --cask (a different kind than approved)
     if not names or not all(re.fullmatch(r"[A-Za-z0-9@][A-Za-z0-9._\-/@\[\],<>=!~*^]*", n) for n in names):
         raise ToolError(f"invalid package name: {a['name']!r}")
-    code, out, err, secs = run([str(BIN / "unienv"), "need", *flag, "--", *names], cwd=UNIENV_HOME, timeout=900)
+    code, out, err, secs = run(
+        [str(BIN / "unienv"), "need", *flag, "--", *names], cwd=UNIENV_HOME, timeout=900, env=install_env()
+    )
     text = (out + ("\n" + err if err.strip() else "")).strip()
     if code != 0:
         raise ToolError(cap(text or f"install failed (exit {code})", 4000))
