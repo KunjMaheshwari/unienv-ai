@@ -1,0 +1,20 @@
+{
+  "name": "unienv",
+  "version": "0.2.2",
+  "description": "One always-ready environment shared by every AI tool: pre-installed Python, Node, Office, PDF, OCR and data tools plus MCP server.",
+  "author": {
+    "name": "Rupesh Bharambe",
+    "url": "https://github.com/rupeshbharambe24"
+  },
+  "homepage": "https://github.com/rupeshbharambe24/unienv-ai",
+  "repository": "https://github.com/rupeshbharambe24/unienv-ai",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["documents", "docx", "xlsx", "pptx", "pdf", "ocr", "python", "unienv"],
+  "skills": "./plugins/unienv/skills",
+  "mcpServers": {
+    "unienv": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/plugins/unienv/scripts/unienv-mcp.sh",
+      "args": []
+    }
+  }
+}
