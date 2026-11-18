@@ -504,16 +504,39 @@ INSTRUCTIONS = (
 # ── JSON-RPC / MCP plumbing ─────────────────────────────────────────────────
 
 
+def _invalid_request(mid=None) -> dict:
+    return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32600, "message": "Invalid Request"}}
+
+
+def _valid_id(val) -> bool:
+    return val is None or isinstance(val, str) or (isinstance(val, (int, float)) and not isinstance(val, bool))
+
+
 def handle(msg: dict) -> dict | None:
-    method, mid, params = msg.get("method"), msg.get("id"), msg.get("params") or {}
-    if mid is None:  # notification (initialized, cancelled, ...): nothing to send back
+    has_id = "id" in msg
+    raw_id = msg.get("id")
+    mid = raw_id if has_id and _valid_id(raw_id) else None
+    if msg.get("jsonrpc") != "2.0" or not isinstance(msg.get("method"), str):
+        return _invalid_request(mid)
+    if has_id and not _valid_id(raw_id):
+        return _invalid_request(None)
+    if not has_id:  # notification (initialized, cancelled, ...): nothing to send back
         return None
+    method = msg["method"]
 
     def ok(result):
         return {"jsonrpc": "2.0", "id": mid, "result": result}
 
     def error(code, message):
         return {"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": message}}
+
+    raw_params = msg.get("params")
+    if raw_params is None:
+        params = {}
+    elif isinstance(raw_params, dict):
+        params = raw_params
+    else:
+        return error(-32602, "params must be an object")
 
     if method == "initialize":
         wanted = params.get("protocolVersion")
@@ -531,10 +554,19 @@ def handle(msg: dict) -> dict | None:
     if method == "tools/list":
         return ok({"tools": [{k: v for k, v in t.items() if k != "fn"} for t in TOOLS]})
     if method == "tools/call":
-        tool = TOOL_INDEX.get(params.get("name"))
+        tool_name = params.get("name")
+        if not isinstance(tool_name, str):
+            return error(-32602, "tool name must be a string")
+        tool = TOOL_INDEX.get(tool_name)
         if tool is None:
-            return error(-32602, f"unknown tool: {params.get('name')}")
-        args = params.get("arguments") or {}
+            return error(-32602, f"unknown tool: {tool_name}")
+        raw_args = params.get("arguments")
+        if raw_args is None:
+            args = {}
+        elif isinstance(raw_args, dict):
+            args = raw_args
+        else:
+            return error(-32602, "arguments must be an object")
         missing = [k for k in tool["inputSchema"].get("required", []) if k not in args]
         if missing:
             return error(-32602, f"missing required argument(s): {', '.join(missing)}")
@@ -552,6 +584,24 @@ def handle(msg: dict) -> dict | None:
     return error(-32601, f"method not found: {method}")
 
 
+def _safe_handle(msg) -> dict | None:
+    if not isinstance(msg, dict):
+        return _invalid_request()
+    try:
+        return handle(msg)
+    except Exception as e:
+        log(f"internal error handling {msg.get('method')!r}: {type(e).__name__}: {e}")
+        if "id" not in msg:
+            return None
+        raw_id = msg["id"]
+        mid = raw_id if _valid_id(raw_id) else None
+        return {
+            "jsonrpc": "2.0",
+            "id": mid,
+            "error": {"code": -32603, "message": f"internal error: {type(e).__name__}"},
+        }
+
+
 def serve() -> int:
     log(f"started (UniEnv home {UNIENV_HOME}, working folder {WORKDIR})")
     for line in sys.stdin:
@@ -563,11 +613,16 @@ def serve() -> int:
         except json.JSONDecodeError:
             reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}
         else:
-            batch = msg if isinstance(msg, list) else [msg]
-            replies = [r for r in (handle(m) for m in batch if isinstance(m, dict)) if r]
-            reply = replies if isinstance(msg, list) else (replies[0] if replies else None)
+            if isinstance(msg, list):
+                if not msg:
+                    reply = _invalid_request()
+                else:
+                    replies = [r for r in (_safe_handle(m) for m in msg) if r is not None]
+                    reply = replies or None
+            else:
+                reply = _safe_handle(msg)
         if reply:
-            sys.stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
+            sys.stdout.write(json.dumps(reply, ensure_ascii=True) + "\n")
             sys.stdout.flush()
     return 0
 
