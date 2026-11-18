@@ -364,6 +364,16 @@ def wanted(recipes: list[dict], state: dict) -> dict[str, list[str]]:
     }
 
 
+def _apt_installed(pkg: str) -> bool:
+    """True only when dpkg reports the package as fully installed.
+
+    `dpkg -s` also exits 0 for a package that was removed but not purged
+    (`deinstall ok config-files`), which would wrongly skip a reinstall.
+    """
+    r = run(["dpkg-query", "-W", "-f=${Status}", pkg], capture=True, check=False)
+    return r.stdout.strip() == "install ok installed"
+
+
 # ── installers ──────────────────────────────────────────────────────────────
 
 
@@ -395,7 +405,7 @@ def install_system(w: dict, *, assume_yes: bool) -> list[str]:
         if not formulas and not casks:
             info("  all system packages already installed")
     elif pk == "debian":
-        pkgs = [p for p in w["apt"] if run(["dpkg", "-s", p], capture=True, check=False).returncode != 0]
+        pkgs = [p for p in w["apt"] if not _apt_installed(p)]
         if pkgs:
             cmd = ["sudo", "apt-get", "install", "-y", *pkgs]
             if assume_yes or os.geteuid() == 0:
