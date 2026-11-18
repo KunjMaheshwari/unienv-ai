@@ -1159,6 +1159,92 @@ def cmd_update(args) -> int:
 # ── doctor ──────────────────────────────────────────────────────────────────
 
 
+_HOSTILE_ALIASES = {
+    r"eza|exa": "reads file names from stdin when it isn't a terminal, so agent commands hang until timeout",
+    r"lsd|bat|batcat|less|more": "pages or decorates output meant for programs",
+    r"(rm|cp|mv)\b.*\s-i\b|(rm|cp|mv)\s+-\w*i": "asks for confirmation, which an agent can never answer",
+}
+_ALIAS_LINE_TOKEN_RE = re.compile(
+    r"""(?:^|\s)(?:alias\s+)?(ls|ll|la|cat|grep|find|rm|cp|mv|cd|less)=(?:'([^']*)'|"([^"]*)"|([^\s'";#]+))"""
+)
+
+
+def _parse_alias_output(text: str) -> list[tuple[str, str]]:
+    """Parse shell `alias` table output or alias definitions (including multiple per line)."""
+    out: list[tuple[str, str]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        for name, sq, dq, bare in _ALIAS_LINE_TOKEN_RE.findall(line):
+            out.append((name, (sq or dq or bare).strip()))
+    return out
+
+
+def _hostile_alias_reason(name: str, target: str) -> str | None:
+    return next(
+        (
+            w
+            for pat, w in _HOSTILE_ALIASES.items()
+            if re.match(rf"\s*({pat})\b", target) or (name in ("rm", "cp", "mv") and re.search(pat, f"{name} {target}"))
+        ),
+        None,
+    )
+
+
+def _probe_shell_aliases() -> list[tuple[str, str, str, str]]:
+    """Run interactive shells with AI_AGENT=1 CLAUDECODE=1 and return hostile (shell, name, target, why) tuples."""
+    marker = "__UNIENV_ALIASES__"
+    zdot = Path(os.environ["ZDOTDIR"]).expanduser() if "ZDOTDIR" in os.environ else HOME
+    shells = [
+        (
+            "zsh",
+            ["/bin/zsh", "-ic", f"printf '{marker}\\n'; alias"],
+            any((d / f).exists() for d in (HOME, zdot) for f in (".zshrc", ".zshenv", ".zprofile")),
+        ),
+        (
+            "bash",
+            ["/bin/bash", "-ic", f"[ -f ~/.bashrc ] && . ~/.bashrc; printf '{marker}\\n'; alias"],
+            any((HOME / f).exists() for f in (".bashrc", ".bash_profile", ".bash_aliases", ".profile")),
+        ),
+    ]
+    env = {
+        "HOME": str(HOME),
+        "USER": os.environ.get("USER", ""),
+        "PATH": search_path(),
+        "TERM": "dumb",
+        "AI_AGENT": "1",
+        "CLAUDECODE": "1",
+    }
+    for k in ("ZDOTDIR", "UNIENV_HOME"):
+        if k in os.environ:
+            env[k] = os.environ[k]
+
+    findings: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for label, argv, has_rc in shells:
+        if not has_rc or not Path(argv[0]).exists():
+            continue
+        try:
+            r = subprocess.run(
+                argv,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                stdin=subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            continue
+        out = r.stdout.split(marker + "\n", 1)[-1] if marker in r.stdout else r.stdout
+        for name, target in _parse_alias_output(out):
+            why = _hostile_alias_reason(name, target)
+            if why and (label, name) not in seen:
+                seen.add((label, name))
+                findings.append((label, name, target, why))
+    return findings
+
+
 def _clean_shell_probe(argv: list[str]) -> str | None:
     """Run `command -v ue-py` in a shell started from a near-empty environment, like an agent or GUI app."""
     env = {
@@ -1355,35 +1441,13 @@ def cmd_doctor(args) -> int:
 
     # Aliases that hang or prompt in agent shells. Claude Code replays your aliases into
     # every command; eza >= 0.23 waits on an open stdin, `-i` flags wait for a "y".
-    hostile = {
-        r"eza|exa": "reads file names from stdin when it isn't a terminal, so agent commands hang until timeout",
-        r"lsd|bat|batcat|less|more": "pages or decorates output meant for programs",
-        r"(rm|cp|mv)\b.*\s-i\b|(rm|cp|mv)\s+-\w*i": "asks for confirmation, which an agent can never answer",
-    }
-    alias_re = re.compile(r"""^\s*alias\s+(ls|ll|la|cat|grep|find|rm|cp|mv|cd|less)=['"]?([^'"\n]+)""", re.M)
-    for rc in (".zshrc", ".bashrc", ".bash_aliases", ".zshenv", ".zprofile", ".profile"):
-        p = HOME / rc
-        if not p.exists():
-            continue
-        text = p.read_text(errors="ignore")
-        guarded = "CLAUDECODE" in text or "AI_AGENT" in text
-        for name, target in alias_re.findall(text):
-            why = next(
-                (
-                    w
-                    for pat, w in hostile.items()
-                    if re.match(rf"\s*({pat})\b", target)
-                    or (name in ("rm", "cp", "mv") and re.search(pat, f"{name} {target}"))
-                ),
-                None,
-            )
-            if why and not guarded:
-                add(
-                    f"alias:{rc}:{name}",
-                    "warn",
-                    f"~/{rc}: alias {name}='{target.strip()}' {why}",
-                    'wrap interactive-only aliases: if [ -z "${AI_AGENT:-}${CLAUDECODE:-}" ]; then ... fi',
-                )
+    for source, name, target, why in _probe_shell_aliases():
+        add(
+            f"alias:{source}:{name}",
+            "warn",
+            f"{source}: alias {name}='{target}' {why}",
+            'wrap interactive-only aliases: if [ -z "${AI_AGENT:-}${CLAUDECODE:-}" ]; then ... fi',
+        )
 
     # Secrets hygiene: report variable names only, never values
     pat = re.compile(r"^\s*export\s+([A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*)=", re.M)
