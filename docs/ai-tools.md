@@ -28,6 +28,24 @@ Run `unienv sync --all-agents` to write instruction files even for tools that ar
 
 **Desktop apps** don't start a shell and get the system's minimal PATH. That's why MCP servers configured as `npx …` or `uvx …` fail with `spawn ENOENT`. Use absolute paths, for example `"command": "/Users/you/.unienv/bin/ue-py"`.
 
+## Sandbox profiles (`unienv sandbox`)
+
+When an AI agent runs inside a restricted sandbox (Claude Code's `/sandbox`, Codex CLI's `workspace-write`, or Gemini CLI's macOS Seatbelt profile), read/execute access to `~/.unienv`, Homebrew prefixes, and temporary directories (`/private/tmp`, `/tmp`) must be permitted so `ue-py`, `ue-node`, and `soffice-safe` work without falling back to throwaway virtualenvs.
+
+- **Print sandbox allow-rules**:
+  ```bash
+  unienv sandbox print --tool claude
+  unienv sandbox print --tool codex
+  unienv sandbox print --tool seatbelt
+  ```
+- **Merge non-destructive read/exec rules into tool configs** (creates a timestamped backup first):
+  ```bash
+  unienv sandbox install --tool claude
+  unienv sandbox install --tool codex
+  ```
+- **Which operations need write access to `~/.unienv`?**
+  Normal agent commands (`ue-py`, `ue-node`, `soffice-safe`, `unienv list`, `unienv doctor`) only need **read/execute** access to `~/.unienv` and **write** access to `/private/tmp` (for throwaway LibreOffice profiles). Only mutating commands — `unienv need`, `unienv install`, `unienv sync`, and `unienv update` — require write access to `~/.unienv`.
+
 ## Adding a tool
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md#writing-an-agent-adapter). An adapter is a few lines in `agent_targets()` in `src/unienv.py`, plus links to the tool's official docs proving the paths.

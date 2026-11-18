@@ -1523,6 +1523,130 @@ def cmd_uninstall(args) -> int:
     return 0
 
 
+# ── sandbox profiles ────────────────────────────────────────────────────────
+
+
+def _sandbox_read_roots() -> list[str]:
+    roots = [str(UNIENV_HOME), "/private/tmp", "/tmp"]
+    bp = brew_prefix()
+    if bp:
+        roots.append(bp)
+    else:
+        roots.extend(["/opt/homebrew", "/usr/local"])
+    return uniq(roots)
+
+
+def sandbox_profile(tool: str) -> str:
+    read_roots = _sandbox_read_roots()
+    if tool == "claude":
+        cfg = {
+            "permissions": {
+                "allow": [
+                    f"Bash({BIN / 'ue-py'} *)",
+                    f"Bash({BIN / 'ue-node'} *)",
+                    f"Bash({BIN / 'soffice-safe'} *)",
+                    f"Bash({BIN / 'unienv'} list*)",
+                    f"Bash({BIN / 'unienv'} doctor*)",
+                    f"Read({UNIENV_HOME}/**)",
+                ]
+            },
+            "sandbox": {
+                "readableRoots": read_roots,
+                "writableRoots": ["/private/tmp", "/tmp"],
+            },
+        }
+        return json.dumps(cfg, indent=2)
+    if tool == "codex":
+        roots_toml = ", ".join(json.dumps(r) for r in ["/private/tmp", "/tmp"])
+        read_toml = ", ".join(json.dumps(r) for r in read_roots)
+        return (
+            "# Codex CLI sandbox profile for UniEnv (read/exec access to ~/.unienv and temp dirs)\n"
+            'sandbox_mode = "workspace-write"\n\n'
+            "[sandbox_workspace_write]\n"
+            f"writable_roots = [{roots_toml}]\n"
+            f"readable_roots = [{read_toml}]\n"
+        )
+    if tool in ("gemini", "seatbelt"):
+        lines = [
+            ";; macOS Seatbelt profile snippet for UniEnv AI (Gemini CLI / sandbox-exec)",
+            "(allow file-read* file-map-executable",
+            *[f'  (subpath "{r}")' for r in read_roots],
+            ")",
+            "(allow file-write*",
+            '  (subpath "/private/tmp")',
+            '  (subpath "/tmp")',
+            ")",
+        ]
+        return "\n".join(lines)
+    die(f"unknown sandbox tool: {tool}")
+
+
+def _install_claude_sandbox(path: Path) -> bool:
+    data = _load_json(path)
+    profile = json.loads(sandbox_profile("claude"))
+    perms = data.setdefault("permissions", {})
+    allow = perms.setdefault("allow", [])
+    changed = False
+    for rule in profile["permissions"]["allow"]:
+        if rule not in allow:
+            allow.append(rule)
+            changed = True
+    sb = data.setdefault("sandbox", {})
+    for key in ("readableRoots", "writableRoots"):
+        existing = sb.setdefault(key, [])
+        for r in profile["sandbox"][key]:
+            if r not in existing:
+                existing.append(r)
+                changed = True
+    if not changed:
+        return False
+    if path.exists():
+        backup = path.with_name(path.name + f".unienv-backup-{_dt.datetime.now():%Y%m%d-%H%M%S}")
+        shutil.copy2(path, backup)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return True
+
+
+def _install_codex_sandbox(path: Path) -> bool:
+    body = sandbox_profile("codex").strip()
+    if path.exists():
+        backup = path.with_name(path.name + f".unienv-backup-{_dt.datetime.now():%Y%m%d-%H%M%S}")
+        shutil.copy2(path, backup)
+    return upsert_block(path, body, SHELL_BEGIN, SHELL_END)
+
+
+def cmd_sandbox(args) -> int:
+    if args.action == "print":
+        tools = ("claude", "codex", "gemini", "seatbelt") if args.tool == "all" else (args.tool,)
+        blocks = []
+        for t in tools:
+            if len(tools) > 1:
+                blocks.append(f"# --- {t} ---\n{sandbox_profile(t)}")
+            else:
+                blocks.append(sandbox_profile(t))
+        print("\n\n".join(blocks))
+        return 0
+    if args.tool not in ("claude", "codex", "all"):
+        die("`unienv sandbox install` supports --tool claude, codex, or all")
+    targets = ("claude", "codex") if args.tool == "all" else (args.tool,)
+    codex_home = Path(os.environ.get("CODEX_HOME", HOME / ".codex"))
+    for t in targets:
+        if t == "claude":
+            cfg_path = HOME / ".claude/settings.json"
+            if _install_claude_sandbox(cfg_path):
+                info(f"  ✓ merged UniEnv sandbox rules into {cfg_path}")
+            else:
+                info(f"  ✓ claude: sandbox rules already present ({cfg_path})")
+        elif t == "codex":
+            cfg_path = codex_home / "config.toml"
+            if _install_codex_sandbox(cfg_path):
+                info(f"  ✓ merged UniEnv sandbox rules into {cfg_path}")
+            else:
+                info(f"  ✓ codex: sandbox rules already present ({cfg_path})")
+    return 0
+
+
 # ── entry point ─────────────────────────────────────────────────────────────
 
 
@@ -1605,6 +1729,16 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
 
     s = sub.add_parser("path", help="print the UniEnv bin directory")
     s.set_defaults(fn=lambda a: print(BIN) or 0)
+
+    s = sub.add_parser("sandbox", help="print or install sandbox allow-rules for Claude Code, Codex, Gemini/Seatbelt")
+    s.add_argument("action", nargs="?", default="print", choices=["print", "install"])
+    s.add_argument(
+        "--tool",
+        default="all",
+        choices=["claude", "codex", "gemini", "seatbelt", "all"],
+        help="which tool profile to print or install (default: all)",
+    )
+    s.set_defaults(fn=cmd_sandbox)
 
     args = p.parse_args(argv)
     mutating = args.cmd in ("install", "need", "sync", "uninstall") or (args.cmd == "doctor" and args.fix)
