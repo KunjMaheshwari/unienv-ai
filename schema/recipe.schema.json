@@ -77,6 +77,15 @@
           "properties": {
             "apt": { "$ref": "#/$defs/stringList", "description": "apt packages." }
           }
+        },
+        "windows": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "winget / Scoop.",
+          "properties": {
+            "winget": { "$ref": "#/$defs/stringList", "description": "winget package IDs." },
+            "scoop": { "$ref": "#/$defs/stringList", "description": "Scoop package names." }
+          }
         }
       }
     },

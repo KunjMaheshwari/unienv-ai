@@ -47,12 +47,21 @@ LOG_FILE = UNIENV_HOME / "log" / "unienv.log"
 BACKUP_DIR = UNIENV_HOME / "backups"
 
 IS_MAC = sys.platform == "darwin"
+IS_WIN = sys.platform == "win32"
 EXTRA_DIRS = [
     "/opt/homebrew/bin",
     "/opt/homebrew/sbin",
     "/usr/local/bin",
     str(HOME / ".local/bin"),
     str(HOME / ".cargo/bin"),
+    *(
+        [
+            str(HOME / "scoop/shims"),
+            str(Path(os.environ.get("LOCALAPPDATA", HOME / "AppData/Local")) / "Microsoft/WinGet/Links"),
+        ]
+        if IS_WIN
+        else []
+    ),
 ]
 
 SHELL_BEGIN, SHELL_END = "# >>> unienv >>>", "# <<< unienv <<<"
@@ -112,10 +121,20 @@ def which(name: str) -> str | None:
 
 
 def libreoffice_path() -> str | None:
-    app = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
-    if IS_MAC and os.access(app, os.X_OK):
-        return app
+    if IS_MAC:
+        app = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+        if os.access(app, os.X_OK):
+            return app
+    if IS_WIN:
+        for base in (os.environ.get("ProgramFiles", r"C:\Program Files"), r"C:\Program Files (x86)"):
+            exe = Path(base) / "LibreOffice/program/soffice.exe"
+            if exe.exists():
+                return str(exe)
     return shutil.which("soffice", path=search_path()) or shutil.which("libreoffice", path=search_path())
+
+
+def venv_python() -> Path:
+    return PY_DIR / (".venv/Scripts/python.exe" if IS_WIN else ".venv/bin/python")
 
 
 def resolve_bin(name: str) -> str | None:
@@ -189,6 +208,8 @@ def uniq(items) -> list:
 def platform_key() -> str:
     if IS_MAC:
         return "macos"
+    if IS_WIN:
+        return "windows"
     if Path("/etc/debian_version").exists():
         return "debian"
     return sys.platform
@@ -317,6 +338,27 @@ def validate_recipe(r: dict, stem: str) -> list[str]:
         v = r.get(section, {}).get(key, [])
         if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
             problems.append(f"[{section}].{key} must be a list of strings")
+    sys_sec = r.get("system", {})
+    allowed_system = {
+        "macos": {"brew", "cask"},
+        "debian": {"apt"},
+        "windows": {"winget", "scoop"},
+    }
+    if not isinstance(sys_sec, dict):
+        problems.append("[system] must be a table")
+    else:
+        for pk, pval in sys_sec.items():
+            if pk not in allowed_system:
+                problems.append(f"unknown [system.{pk}] platform")
+                continue
+            if not isinstance(pval, dict):
+                problems.append(f"[system.{pk}] must be a table")
+                continue
+            for mgr, pkgs in pval.items():
+                if mgr not in allowed_system[pk]:
+                    problems.append(f"unknown [system.{pk}].{mgr} key")
+                elif not isinstance(pkgs, list) or not all(isinstance(x, str) for x in pkgs):
+                    problems.append(f"[system.{pk}].{mgr} must be a list of strings")
     return problems
 
 
@@ -324,7 +366,7 @@ def default_state(recipes: dict) -> dict:
     return {
         "version": VERSION,
         "batteries": [k for k, r in recipes.items() if r.get("default") and not r.get("always")],
-        "extras": {"python": [], "node": [], "brew": [], "cask": [], "apt": []},
+        "extras": {"python": [], "node": [], "brew": [], "cask": [], "apt": [], "winget": [], "scoop": []},
         "options": {"wire_homebrew": True, "exclude": []},
     }
 
@@ -366,8 +408,14 @@ def wanted(recipes: list[dict], state: dict) -> dict[str, list[str]]:
     def system(kind: str) -> list[str]:
         pkgs = [p for r in recipes for p in r.get("system", {}).get(pk, {}).get(kind, [])]
         # "libreoffice" also excludes apt's "libreoffice-writer", "libreoffice-calc", ...
+        # and winget's "TheDocumentFoundation.LibreOffice" (case-insensitive tail/prefix match)
         return [
-            p for p in uniq(pkgs + state["extras"][kind]) if not any(p == x or p.startswith(x + "-") for x in excluded)
+            p
+            for p in uniq(pkgs + state.get("extras", {}).get(kind, []))
+            if not any(
+                p.lower() == x.lower() or p.lower().startswith(x.lower() + "-") or p.lower().endswith("." + x.lower())
+                for x in excluded
+            )
         ]
 
     bins, skipped = [], []
@@ -383,6 +431,8 @@ def wanted(recipes: list[dict], state: dict) -> dict[str, list[str]]:
         "brew": system("brew"),
         "cask": system("cask"),
         "apt": system("apt"),
+        "winget": system("winget"),
+        "scoop": system("scoop"),
         "bins": uniq(bins),
         "skipped_bins": uniq(skipped),
     }
@@ -396,6 +446,11 @@ def _apt_installed(pkg: str) -> bool:
     """
     r = run(["dpkg-query", "-W", "-f=${Status}", pkg], capture=True, check=False)
     return r.stdout.strip() == "install ok installed"
+
+
+def _winget_installed(winget: str, pkg: str) -> bool:
+    r = run([winget, "list", "--exact", "--id", pkg, "--accept-source-agreements"], capture=True, check=False)
+    return r.returncode == 0 and pkg.lower() in (r.stdout or "").lower()
 
 
 # ── installers ──────────────────────────────────────────────────────────────
@@ -440,6 +495,41 @@ def install_system(w: dict, *, assume_yes: bool) -> list[str]:
             else:
                 warn("System packages needed. Run this, then `unienv install` again:\n    " + " ".join(cmd))
                 failures.extend(f"apt:{p}" for p in pkgs)
+    elif pk == "windows":
+        scoop = which("scoop")
+        winget = which("winget")
+        if scoop and w.get("scoop"):
+            have_s = {
+                line.split()[0].lower()
+                for line in run([scoop, "list"], capture=True, check=False).stdout.splitlines()
+                if line.strip() and not line.strip().startswith(("Installed", "---"))
+            }
+            pkgs = [p for p in w["scoop"] if p.split("/")[-1].lower() not in have_s]
+            for p in pkgs:
+                if run([scoop, "install", p], check=False).returncode != 0:
+                    failures.append(f"scoop:{p}")
+            if not pkgs:
+                info("  all system packages already installed")
+        elif winget and w.get("winget"):
+            pkgs = [p for p in w["winget"] if not _winget_installed(winget, p)]
+            for p in pkgs:
+                cmd = [
+                    winget,
+                    "install",
+                    "--exact",
+                    "--id",
+                    p,
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ]
+                if run(cmd, check=False).returncode != 0:
+                    failures.append(f"winget:{p}")
+            if not pkgs:
+                info("  all system packages already installed")
+        elif w.get("winget") or w.get("scoop"):
+            warn("Neither winget nor Scoop found. Install Scoop (https://scoop.sh) or App Installer (winget).")
+            failures.extend(f"windows:{p}" for p in (w.get("winget") or w.get("scoop") or []))
     else:
         warn(f"No system package backend for {pk} yet; install these yourself: {', '.join(w['bins'])}")
     return failures
@@ -538,7 +628,17 @@ def write_shims() -> None:
     ue = BIN / "ue"
     if ue.is_symlink() or ue.exists():
         ue.unlink()
-    ue.symlink_to("unienv")
+    if IS_WIN:
+        py_exe = venv_python()
+        (BIN / "ue-py.cmd").write_text(f'@echo off\r\nset PYTHONUTF8=1\r\n"{py_exe}" %*\r\n')
+        (BIN / "ue-node.cmd").write_text(
+            f'@echo off\r\nset "NODE_PATH={UNIENV_HOME / "node" / "node_modules"};%NODE_PATH%"\r\n"{node}" %*\r\n'
+        )
+        cli_cmd = f'@echo off\r\nset PYTHONUTF8=1\r\n"{sys.executable}" "{Path(__file__).resolve()}" %*\r\n'
+        (BIN / "unienv.cmd").write_text(cli_cmd)
+        (BIN / "ue.cmd").write_text(cli_cmd)
+    else:
+        ue.symlink_to("unienv")
 
 
 def brew_prefix() -> str | None:
@@ -584,7 +684,7 @@ def write_env_sh(state: dict) -> None:
 
 
 def python_packages() -> dict[str, str]:
-    py = PY_DIR / ".venv/bin/python"
+    py = venv_python()
     if not py.exists():
         return {}
     r = run(
@@ -623,12 +723,12 @@ def write_manifest(recipes: list[dict], state: dict, w: dict) -> dict:
         "platform": f"{platform.system()} {platform.machine()}",
         "batteries": [r["id"] for r in recipes],
         "python": {
-            "command": str(BIN / "ue-py"),
-            "executable": str(PY_DIR / ".venv/bin/python"),
+            "command": str(BIN / ("ue-py.cmd" if IS_WIN else "ue-py")),
+            "executable": str(venv_python()),
             "version": PY_VERSION,
             "packages": top,
         },
-        "node": {"command": str(BIN / "ue-node"), "packages": node_packages(w["node"])},
+        "node": {"command": str(BIN / ("ue-node.cmd" if IS_WIN else "ue-node")), "packages": node_packages(w["node"])},
         "bins": {b: resolve_bin(b) for b in w["bins"]},
         "extras": state["extras"],
     }
@@ -872,8 +972,12 @@ def cmd_need(args) -> int:
     recipes_all = load_recipes()
     state = load_state(recipes_all)
     kind = "node" if args.node else "brew" if args.bin else "cask" if args.cask else "python"
-    if kind in ("brew", "cask") and platform_key() == "debian":
-        kind = "apt"
+    if kind in ("brew", "cask"):
+        pk = platform_key()
+        if pk == "debian":
+            kind = "apt"
+        elif pk == "windows":
+            kind = "scoop" if which("scoop") else "winget"
     pkgs = args.packages
     recipes = active_recipes(recipes_all, state)
     w = wanted(recipes, state)
@@ -926,6 +1030,8 @@ def cmd_need(args) -> int:
                     "brew": new if kind == "brew" else [],
                     "cask": new if kind == "cask" else [],
                     "apt": new if kind == "apt" else [],
+                    "winget": new if kind == "winget" else [],
+                    "scoop": new if kind == "scoop" else [],
                 },
                 assume_yes=args.yes,
             )
@@ -1194,7 +1300,7 @@ def cmd_doctor(args) -> int:
     add("prefix", "ok", str(UNIENV_HOME))
 
     # Python environment and imports
-    py = PY_DIR / ".venv/bin/python"
+    py = venv_python()
     imports = uniq([m for r in recipes for m in r.get("python", {}).get("imports", [])])
     if not py.exists():
         add("python", "fail", "shared Python env missing", "unienv install")
