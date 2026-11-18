@@ -734,10 +734,34 @@ def sync_agents(manifest: dict, recipes: list[dict], *, only_detected: bool = Tr
     return done
 
 
+def _zdotdir() -> Path | None:
+    raw = os.environ.get("ZDOTDIR", "").strip()
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    try:
+        same = p.resolve() == HOME.resolve()
+    except OSError:
+        same = p == HOME
+    return None if same else p
+
+
+def _shell_files() -> list[Path]:
+    if not SHELL_FILES:
+        return []
+    files = list(SHELL_FILES)
+    zdot = _zdotdir()
+    if zdot is not None:
+        zenv = zdot / ".zshenv"
+        if zenv not in files:
+            files.append(zenv)
+    return files
+
+
 def wire_shells() -> list[str]:
     body = f'[ -f "{ENV_SH}" ] && . "{ENV_SH}"'
     changed = []
-    for rc in SHELL_FILES:
+    for rc in _shell_files():
         # always wire zsh's .zshenv and the POSIX .profile; bash's own files only if they exist
         # (login bash reads .bash_profile or .bash_login *instead of* .profile when present)
         if rc.name not in (".zshenv", ".profile") and not rc.exists():
@@ -1159,7 +1183,7 @@ def cmd_update(args) -> int:
 # ── doctor ──────────────────────────────────────────────────────────────────
 
 
-def _clean_shell_probe(argv: list[str]) -> str | None:
+def _clean_shell_probe(argv: list[str], *, extra_env: dict[str, str] | None = None) -> str | None:
     """Run `command -v ue-py` in a shell started from a near-empty environment, like an agent or GUI app."""
     env = {
         "HOME": str(HOME),
@@ -1169,6 +1193,8 @@ def _clean_shell_probe(argv: list[str]) -> str | None:
     }
     if "UNIENV_HOME" in os.environ:
         env["UNIENV_HOME"] = os.environ["UNIENV_HOME"]
+    if extra_env:
+        env.update(extra_env)
     try:
         r = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -1245,15 +1271,18 @@ def cmd_doctor(args) -> int:
 
     # Shell wiring: what agents and GUI apps actually see
     target = str(BIN / "ue-py")
-    probes = [
-        ("zsh -c", ["/bin/zsh", "-c", "command -v ue-py"]),
-        ("zsh -lc", ["/bin/zsh", "-lc", "command -v ue-py"]),
-        ("bash -lc", ["/bin/bash", "-lc", "command -v ue-py"]),
+    probes: list[tuple[str, list[str], dict[str, str] | None]] = [
+        ("zsh -c", ["/bin/zsh", "-c", "command -v ue-py"], None),
+        ("zsh -lc", ["/bin/zsh", "-lc", "command -v ue-py"], None),
+        ("bash -lc", ["/bin/bash", "-lc", "command -v ue-py"], None),
     ]
-    for label, argv in probes:
+    zdot = _zdotdir()
+    if zdot is not None:
+        probes.append(("ZDOTDIR zsh -c", ["/bin/zsh", "-c", "command -v ue-py"], {"ZDOTDIR": str(zdot)}))
+    for label, argv, extra_env in probes:
         if not Path(argv[0]).exists():
             continue
-        got = _clean_shell_probe(argv)
+        got = _clean_shell_probe(argv) if extra_env is None else _clean_shell_probe(argv, extra_env=extra_env)
         if got == target:
             add(f"shell:{label}", "ok", f"`{label}` finds ue-py")
         else:
@@ -1487,7 +1516,7 @@ def cmd_wire(args) -> int:
 
 
 def cmd_uninstall(args) -> int:
-    for rc in SHELL_FILES:
+    for rc in _shell_files():
         try:
             if remove_block(rc, SHELL_BEGIN, SHELL_END):
                 info(f"  removed block from {rc}")
