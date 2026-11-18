@@ -325,7 +325,7 @@ def default_state(recipes: dict) -> dict:
         "version": VERSION,
         "batteries": [k for k, r in recipes.items() if r.get("default") and not r.get("always")],
         "extras": {"python": [], "node": [], "brew": [], "cask": [], "apt": []},
-        "options": {"wire_homebrew": True, "exclude": []},
+        "options": {"wire_homebrew": True, "wire_shells": True, "exclude": []},
     }
 
 
@@ -751,7 +751,12 @@ def wire_shells() -> list[str]:
 
 
 def do_sync(
-    state: dict, recipes_all: dict, *, quiet: bool = False, wire: bool = True, all_agents: bool = False
+    state: dict,
+    recipes_all: dict,
+    *,
+    quiet: bool = False,
+    wire: bool | None = None,
+    all_agents: bool = False,
 ) -> dict:
     recipes = active_recipes(recipes_all, state)
     w = wanted(recipes, state)
@@ -759,7 +764,8 @@ def do_sync(
     write_env_sh(state)
     manifest = write_manifest(recipes, state, w)
     agents = sync_agents(manifest, recipes, only_detected=not all_agents)
-    wired = wire_shells() if wire else []
+    should_wire = state.get("options", {}).get("wire_shells", True) if wire is None else wire
+    wired = wire_shells() if should_wire else []
     if not quiet:
         info(f"  shims: {', '.join(sorted(p.name for p in BIN.iterdir()))}")
         info(f"  agents configured: {', '.join(agents) or '(none detected)'}")
@@ -834,6 +840,7 @@ def cmd_install(args) -> int:
                 hints.append(f"unknown battery: {b}" + (f" (did you mean {close[0]}?)" if close else ""))
             die("; ".join(hints) + f". Available: {', '.join(recipes_all)}")
         state["batteries"] = uniq(state["batteries"] + [b for b in req if not recipes_all[b].get("always")])
+    state["options"]["wire_shells"] = not args.no_wire
     UNIENV_HOME.mkdir(parents=True, exist_ok=True)
     save_state(state)
     recipes = active_recipes(recipes_all, state)
@@ -864,7 +871,7 @@ def cmd_sync(args) -> int:
     recipes_all = load_recipes()
     state = load_state(recipes_all)
     step("Regenerating shims, env.sh, manifest and agent files")
-    do_sync(state, recipes_all, wire=not args.no_wire, all_agents=args.all_agents)
+    do_sync(state, recipes_all, wire=False if args.no_wire else None, all_agents=args.all_agents)
     return 0
 
 
@@ -1482,6 +1489,10 @@ def cmd_wire(args) -> int:
         info("✓ GUI PATH set (experimental). Quit and reopen desktop apps to pick it up.")
         return 0
     changed = wire_shells()
+    recipes_all = load_recipes()
+    state = load_state(recipes_all)
+    state["options"]["wire_shells"] = True
+    save_state(state)
     info("✓ shell files updated: " + (", ".join(changed) if changed else "already wired"))
     return 0
 
