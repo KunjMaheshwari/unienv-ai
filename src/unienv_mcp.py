@@ -348,10 +348,10 @@ def t_install_package(a: dict) -> str:
     flag = {"python": [], "node": ["--node"], "brew": ["--bin"], "cask": ["--cask"]}.get(kind)
     if flag is None:
         raise ToolError("kind must be one of: python, node, brew, cask")
-    names = a["name"].split()
+    names = [] if any(c in a["name"] for c in "\r\n\t") else a["name"].split()
     # every token must look like a package spec: no leading "-", so a name can't smuggle in
     # CLI flags such as -y (non-interactive sudo) or --cask (a different kind than approved)
-    if not names or not all(re.fullmatch(r"[A-Za-z0-9@][A-Za-z0-9._\-/@\[\],<>=!~]*", n) for n in names):
+    if not names or not all(re.fullmatch(r"[A-Za-z0-9@][A-Za-z0-9._\-/@\[\],<>=!~*^]*", n) for n in names):
         raise ToolError(f"invalid package name: {a['name']!r}")
     code, out, err, secs = run([str(BIN / "unienv"), "need", *flag, "--", *names], cwd=UNIENV_HOME, timeout=900)
     text = (out + ("\n" + err if err.strip() else "")).strip()

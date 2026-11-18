@@ -131,6 +131,44 @@ check("install_package rejects shell metacharacters", is_error(9) and "invalid p
 check("unknown tool is a JSON-RPC error", replies[10].get("error", {}).get("code") == -32602)
 check("install_package rejects smuggled flags (-y)", is_error(13) and "invalid package name" in text(13))
 check("install_package rejects smuggled flags (--cask)", is_error(14) and "invalid package name" in text(14))
+
+# Isolated install_package acceptance check (stub `bin/unienv` avoids network/state changes)
+with tempfile.TemporaryDirectory(prefix="ue_mcp_pkg.") as pkg_home:
+    bin_dir = Path(pkg_home) / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "unienv"
+    stub.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\"\n")
+    stub.chmod(0o755)
+    pkg_msgs = [
+        call(101, "install_package", {"name": "pandas==2.*", "kind": "python"}),
+        call(102, "install_package", {"name": "node-gyp@^9", "kind": "node"}),
+        call(103, "install_package", {"name": "docx@~8.5", "kind": "node"}),
+    ]
+    pkg_env = {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin", "UNIENV_HOME": pkg_home, "UNIENV_WORKDIR": str(WORK)}
+    pkg_proc = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[1] / "src" / "unienv_mcp.py")],
+        input="\n".join(map(json.dumps, pkg_msgs)) + "\n",
+        capture_output=True,
+        text=True,
+        env=pkg_env,
+        timeout=60,
+    )
+    pkg_replies = {m.get("id"): m for m in map(json.loads, pkg_proc.stdout.splitlines())}
+    check(
+        "install_package accepts Python wildcard (pandas==2.*)",
+        not pkg_replies[101]["result"]["isError"]
+        and pkg_replies[101]["result"]["content"][0]["text"].strip() == "need -- pandas==2.*",
+    )
+    check(
+        "install_package accepts npm caret (node-gyp@^9)",
+        not pkg_replies[102]["result"]["isError"]
+        and pkg_replies[102]["result"]["content"][0]["text"].strip() == "need --node -- node-gyp@^9",
+    )
+    check(
+        "install_package accepts npm tilde (docx@~8.5)",
+        not pkg_replies[103]["result"]["isError"]
+        and pkg_replies[103]["result"]["content"][0]["text"].strip() == "need --node -- docx@~8.5",
+    )
 renders = sorted(WORK.glob("two-pages*"))
 check(
     "pdf → png twice keeps both renders",
