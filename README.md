@@ -9,6 +9,7 @@
   <img src="https://img.shields.io/badge/python-3.12-3776ab?logo=python&logoColor=white" alt="Python 3.12">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License"></a>
   <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
+  <a href="https://github.com/rupeshbharambe24/unienv-ai/stargazers"><img src="https://img.shields.io/github/stars/rupeshbharambe24/unienv-ai?style=social" alt="GitHub stars"></a>
 </p>
 
 <p align="center">
@@ -46,6 +47,8 @@ You ask your AI agent to *"fix the table in this Word file"* or *"summarise this
 ✓ ue need seaborn                        # missing? installed permanently, for everyone, in seconds
 ```
 
+> ⭐ **If UniEnv is useful to you, please [star the repo](https://github.com/rupeshbharambe24/unienv-ai/stargazers).** It's free, takes one click, and is the main way other people find the project.
+
 <p align="center">
   <img src="docs/assets/demo.svg" alt="Terminal showing unienv status and unienv doctor: all good" width="780">
 </p>
@@ -77,7 +80,7 @@ Agents run every command in a fresh `zsh -c` / `bash -lc`, which skips your `.zs
 <td valign="top">
 
 **♻️ Grows instead of resetting**<br>
-`unienv need <pkg>` installs permanently for every tool, takes about 2 s with a warm cache, and rolls back automatically if anything breaks.
+`unienv need <pkg>` installs permanently for every tool, takes about 2 s with a warm cache, and rolls back automatically if anything breaks. It is safe when several agents run it at the same time.
 
 </td>
 </tr>
@@ -91,7 +94,7 @@ Agents run every command in a fresh `zsh -c` / `bash -lc`, which skips your `.zs
 <td valign="top">
 
 **🧹 Never in your way**<br>
-No `python`/`node` shadowing (only namespaced `ue-*` commands), project envs come first, no Docker, no telemetry, and `unienv uninstall` removes every line it wrote.
+No `python`/`node` shadowing (only namespaced `ue-*` commands), project envs come first, no Docker, no telemetry, and `unienv uninstall` removes every line it wrote, including its MCP entries.
 
 </td>
 </tr>
@@ -184,7 +187,7 @@ Details: [How it works](docs/how-it-works.md) · [AI tool integrations](docs/ai-
 | `unienv update` | Download the latest UniEnv and re-install |
 | `unienv wire [--gui]` | Rewrite shell blocks; `--gui` (experimental, macOS) sets the PATH desktop apps see |
 | `unienv mcp install [--client …]` | Connect Claude Desktop / Cursor / other MCP apps ([guide](docs/mcp.md)) |
-| `unienv uninstall [--purge]` | Remove everything UniEnv wrote; `--purge` also deletes `~/.unienv` |
+| `unienv uninstall [--purge]` | Remove everything UniEnv wrote (shell lines, agent blocks, MCP entries); `--purge` also deletes `~/.unienv` |
 
 `ue` is a short alias for `unienv`.
 
@@ -196,7 +199,8 @@ Details: [How it works](docs/how-it-works.md) · [AI tool integrations](docs/ai-
 | Codex CLI | ✅ instructions + skill + shell |
 | Gemini CLI | ✅ instructions + shell |
 | OpenCode | ✅ instructions + shell |
-| Cursor, Windsurf, Cline, Roo, Copilot, Aider | ◐ shell works; paste `~/.unienv/AGENTS.md` into user rules. [Adapters wanted](https://github.com/rupeshbharambe24/unienv-ai/labels/adapter) |
+| Cursor | ◐ shell works, MCP via `unienv mcp install --client cursor`; paste `~/.unienv/AGENTS.md` into User Rules ([adapter wanted](https://github.com/rupeshbharambe24/unienv-ai/issues/4)) |
+| Windsurf, Cline, Roo, Copilot, Aider | ◐ shell works; paste `~/.unienv/AGENTS.md` into user rules. [Adapters wanted](https://github.com/rupeshbharambe24/unienv-ai/labels/adapter) |
 | **Claude Desktop chat** | ✅ via the UniEnv MCP server: `unienv mcp install` or the one-click `.mcpb` extension ([guide](docs/mcp.md)) |
 | LM Studio & other MCP apps | ✅ via MCP: `unienv mcp config` prints the snippet |
 | Claude.ai / ChatGPT on the web, Cowork | ❌ they run in the cloud or a VM and can't reach your computer |
@@ -236,7 +240,7 @@ It installs from the same public registries an agent would use anyway (PyPI, npm
 <details>
 <summary><b>Windows?</b></summary>
 
-Not yet: Windows (winget/Scoop) and WSL are planned for 1.0. Help is very welcome.
+Not yet: Windows (winget/Scoop) and WSL are planned for 1.0 ([#8](https://github.com/rupeshbharambe24/unienv-ai/issues/8)). Help is very welcome.
 </details>
 
 ## 🧪 Measured
@@ -267,9 +271,18 @@ UniEnv is built to be extended by the community. The best first contributions:
 - 🔋 **A new battery**: one TOML file, no code ([guide](CONTRIBUTING.md#writing-a-recipe))
 - 🤖 **An adapter** for another AI tool ([guide](CONTRIBUTING.md#writing-an-agent-adapter))
 - 🐧 **Linux/Windows backends**
-- 🐛 **Bug reports** with `unienv doctor --json`
+- 🐛 **Bug fixes**: many open bugs come with a reproduction and a suggested fix
+- 🩺 **Bug reports** with `unienv doctor --json`
 
-Look for [`good first issue`](https://github.com/rupeshbharambe24/unienv-ai/labels/good%20first%20issue), read [CONTRIBUTING.md](CONTRIBUTING.md), and say hi in [Discussions](https://github.com/rupeshbharambe24/unienv-ai/discussions). If UniEnv saves you time, a ⭐ helps others find it.
+Look for [`good first issue`](https://github.com/rupeshbharambe24/unienv-ai/labels/good%20first%20issue), read [CONTRIBUTING.md](CONTRIBUTING.md), and say hi in [Discussions](https://github.com/rupeshbharambe24/unienv-ai/discussions). Every PR is checked automatically (lint, recipe schema, unit tests, and install + smoke tests on macOS and Linux), so you get feedback fast.
+
+### ⭐ Support the project
+
+UniEnv is free and open source. If it saves you time, please **[give it a star on GitHub](https://github.com/rupeshbharambe24/unienv-ai)**. Stars are how other developers discover the project, and they keep it going. Sharing it with a friend or your team helps just as much.
+
+### Contributors
+
+Thank you to everyone who has helped build UniEnv AI: [@bfs2021](https://github.com/bfs2021), [@SantanDon](https://github.com/SantanDon), [@CyberKun](https://github.com/CyberKun), [@sanjanamg0](https://github.com/sanjanamg0) and [@KunjMaheshwari](https://github.com/KunjMaheshwari). Want to see your name here? Pick an [issue](https://github.com/rupeshbharambe24/unienv-ai/labels/good%20first%20issue).
 
 ## License
 

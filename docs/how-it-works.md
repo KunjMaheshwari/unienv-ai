@@ -27,7 +27,8 @@ flowchart LR
 | `AGENTS.md` | The instruction block, for tools without a known global file (paste it into Cursor's User Rules, for example). |
 | `state.json` | Your batteries, extras added with `need`, and options such as `exclude`. |
 | `share/` | The CLI, recipes and templates (a symlink to your checkout in `--dev` mode). |
-| `backups/` | Snapshots taken before every `need`, used for rollback. |
+| `backups/` | Snapshots taken before every `need`, used for rollback, and to recover a corrupt `state.json`. |
+| `.lock` | Held while a command changes `~/.unienv` (`install`, `need`, `sync`, `uninstall`, `doctor --fix`), so parallel agents queue instead of clashing. |
 | `log/unienv.log` | One JSON line per install, sync and `need`. |
 
 ## Why each shell file?
@@ -53,11 +54,12 @@ AI agents run each command in a **fresh, non-interactive** shell, which skips th
 
 ## The `need` flow
 
-1. Already provided? Answer instantly (`✓ already available`).
-2. Snapshot `state.json`, `pyproject.toml`, `uv.lock` and `package.json`.
-3. Add the package to your extras and re-resolve with uv or npm, or install with Homebrew.
-4. On failure, restore the snapshot and re-sync. The env is exactly as before.
-5. On success, regenerate `manifest.json`, the agent blocks and the skill, so **every** AI tool learns about the new package.
+1. Take the lock. If another agent is already running `unienv need`, wait for it (`waiting for another unienv command to finish…`).
+2. Already provided? Answer instantly (`✓ already available`).
+3. Snapshot `state.json`, `pyproject.toml`, `uv.lock` and `package.json`.
+4. Add the package to your extras and re-resolve with uv or npm, or install with Homebrew.
+5. On failure, restore the snapshot and re-sync. The env is exactly as before.
+6. On success, regenerate `manifest.json`, the agent blocks and the skill, so **every** AI tool learns about the new package.
 
 ## What UniEnv writes outside `~/.unienv`
 
@@ -66,4 +68,5 @@ Only marked blocks, removed by `unienv uninstall`:
 - `~/.zshenv`, `~/.profile`, and `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` if they exist: one line, `[ -f ~/.unienv/env.sh ] && . ~/.unienv/env.sh`
 - Agent instruction files for detected tools, between `<!-- >>> unienv … >>> -->` markers
 - `skills/unienv/SKILL.md` for Claude Code and Codex
+- With `unienv mcp install` only: the `unienv` entry under `mcpServers` in Claude Desktop's and Cursor's config (other servers are never touched; a timestamped backup is kept)
 - With `unienv wire --gui` only: `~/Library/LaunchAgents/ai.unienv.path.plist`

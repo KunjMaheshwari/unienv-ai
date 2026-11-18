@@ -4,6 +4,40 @@ All notable changes to UniEnv AI are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Fixed
+- MCP server no longer crashes on malformed JSON-RPC requests or lone-surrogate strings; bad requests get proper JSON-RPC errors. By @KunjMaheshwari in #79. (#67)
+- MCP tools pass proxy and CA certificate variables through, and `install_package` also gets package-index settings (`UV_*`, `PIP_*`, safe `HOMEBREW_*`), so installs work behind corporate proxies. By @KunjMaheshwari in #83. (#68)
+- MCP `install_package` accepts `*` and `^` version specs (`pandas==2.*`, `node-gyp@^9`). By @KunjMaheshwari in #76. (#73)
+- Non-UTF-8 and read-only dotfiles no longer crash `sync`, `install` or `uninstall`: unknown bytes are kept as-is, and unwritable files get a warning. By @KunjMaheshwari in #81. (#61)
+- `unienv doctor` warns and keeps going when an MCP client config has invalid JSON. By @KunjMaheshwari in #82. (#60)
+- `unienv need` with double-quoted PEP 508 markers writes valid `pyproject.toml`. By @KunjMaheshwari in #80. (#62)
+- Agent instructions and the skill call `unienv` by its absolute path. By @KunjMaheshwari in #77. (#72)
+
+### Added
+- Lint job in CI: `ruff check`, `ruff format --check` and shellcheck on every PR. By @sanjanamg0 in #53. (#43)
+- JSON Schema for recipes (`schema/recipe.schema.json`), validated in CI, with editor autocomplete via a `#:schema` line. By @sanjanamg0 in #54. (#11)
+
+### Docs
+- README, CONTRIBUTING, ROADMAP and docs brought up to date for 0.2.1: how to run every CI check locally, the locking behaviour, new troubleshooting entries, and a contributors list.
+
+## [0.2.1] - 2026-11-17
+
+First release with community contributions. Thank you @bfs2021, @SantanDon and @CyberKun!
+
+### Security
+- MCP `install_package` rejects package names that smuggle in CLI flags (`"pandas -y"`, `"x --cask y"`) and passes names after `--`. (#14)
+
+### Fixed
+- `unienv uninstall` removes the `unienv` server from Claude Desktop and Cursor MCP configs (other servers untouched, backup kept). (#13)
+- Commands that change `~/.unienv` take a lock, so parallel `unienv need` calls are safe; state, manifest, `env.sh` and `AGENTS.md` are written atomically; a corrupt `state.json` recovers from the newest backup. (#21)
+- MCP PDF → PNG renders into a fresh `<name>-pages` folder and lists only that call's pages. (#15)
+- `unienv doctor --json --fix` prints a single JSON document, and `--fix` only syncs when sync can repair something. By @CyberKun. (#17, #49)
+- `unienv install --add` rejects unknown batteries with a "did you mean" hint. By @bfs2021. (#19, #47)
+
+### Added
+- Unit test suite in `tests/unit/`, run in CI. By @SantanDon. (#42, #48)
+- CI checks for parallel `need`, `doctor --json --fix`, MCP flag injection and repeated PDF renders.
+
 ## [0.2.0] - 2026-10-28
 
 ### Added
@@ -38,6 +72,7 @@ First public prototype.
 - Login bash on Linux skipped `~/.profile` when `~/.bash_profile` exists; both are now wired.
 - Homebrew's automatic `brew cleanup` no longer runs as a side effect of UniEnv installs.
 
-[Unreleased]: https://github.com/rupeshbharambe24/unienv-ai/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/rupeshbharambe24/unienv-ai/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/rupeshbharambe24/unienv-ai/releases/tag/v0.2.1
 [0.2.0]: https://github.com/rupeshbharambe24/unienv-ai/releases/tag/v0.2.0
 [0.1.0]: https://github.com/rupeshbharambe24/unienv-ai/releases/tag/v0.1.0
