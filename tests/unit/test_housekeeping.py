@@ -1,0 +1,107 @@
+"""Unit tests for housekeeping: backup pruning, stale shim cleanup, and `unienv du` (#38)."""
+
+import argparse
+import contextlib
+import datetime as _dt
+import importlib.util
+import io
+import pathlib
+import tempfile
+import unittest
+from unittest.mock import patch
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+spec = importlib.util.spec_from_file_location("unienv", ROOT / "src" / "unienv.py")
+u = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(u)
+
+
+class HousekeepingTests(unittest.TestCase):
+    def test_prune_backups_keeps_10_most_recent_and_any_newer_than_7_days(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+            bdir = pathlib.Path(tmp) / "backups"
+            stack.enter_context(patch.object(u, "BACKUP_DIR", bdir))
+            now = _dt.datetime.now()
+
+            # 15 old snapshots (> 7 days old)
+            old_names = []
+            for i in range(15):
+                dt = now - _dt.timedelta(days=30 - i)
+                name = dt.strftime("%Y%m%d-%H%M%S")
+                (bdir / name).mkdir(parents=True)
+                old_names.append(name)
+
+            # Prune should keep the 10 most recent of the 15 old snapshots, removing the 5 oldest
+            removed = u.prune_backups(keep=10, min_age_days=7)
+            self.assertEqual(len(removed), 5)
+            remaining = sorted(p.name for p in bdir.iterdir())
+            self.assertEqual(remaining, old_names[-10:])
+
+            # Now add 12 recent snapshots (< 7 days old); all 12 recent ones should be kept even though > 10
+            recent_names = []
+            for i in range(12):
+                dt = now - _dt.timedelta(days=3, hours=12 - i)
+                name = dt.strftime("%Y%m%d-%H%M%S")
+                (bdir / name).mkdir(parents=True)
+                recent_names.append(name)
+
+            u.prune_backups(keep=10, min_age_days=7)
+            remaining2 = sorted(p.name for p in bdir.iterdir())
+            self.assertEqual(remaining2, sorted(recent_names))
+
+    def test_write_shims_removes_stale_shims(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+            root = pathlib.Path(tmp)
+            shims_dir = root / "shims"
+            bin_dir = root / "bin"
+            shims_dir.mkdir(parents=True)
+            stack.enter_context(patch.object(u, "UNIENV_HOME", root))
+            stack.enter_context(patch.object(u, "SHIMS_DIR", shims_dir))
+            stack.enter_context(patch.object(u, "BIN", bin_dir))
+            stack.enter_context(patch.object(u, "STATE_FILE", root / "state.json"))
+
+            (shims_dir / "ue-py").write_text("#!/bin/sh\necho py\n")
+            (shims_dir / "old-shim").write_text("#!/bin/sh\necho old\n")
+            u.write_shims()
+            self.assertTrue((bin_dir / "ue-py").exists())
+            self.assertTrue((bin_dir / "old-shim").exists())
+            self.assertTrue((bin_dir / "unienv").exists())
+            self.assertTrue((bin_dir / "ue").is_symlink())
+
+            # Remove old-shim from SHIMS_DIR and re-run write_shims
+            (shims_dir / "old-shim").unlink()
+            u.write_shims()
+            self.assertTrue((bin_dir / "ue-py").exists())
+            self.assertFalse((bin_dir / "old-shim").exists())
+            self.assertTrue((bin_dir / "unienv").exists())
+            self.assertTrue((bin_dir / "ue").is_symlink())
+
+    def test_cmd_du_reports_py_node_backups_and_total(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+            root = pathlib.Path(tmp)
+            stack.enter_context(patch.object(u, "UNIENV_HOME", root))
+            stack.enter_context(patch.object(u, "PY_DIR", root / "py"))
+            stack.enter_context(patch.object(u, "NODE_DIR", root / "node"))
+            stack.enter_context(patch.object(u, "BACKUP_DIR", root / "backups"))
+
+            u.PY_DIR.mkdir(parents=True)
+            (u.PY_DIR / "a.bin").write_bytes(b"x" * 2048)
+            u.NODE_DIR.mkdir(parents=True)
+            (u.NODE_DIR / "b.bin").write_bytes(b"y" * 1024)
+            u.BACKUP_DIR.mkdir(parents=True)
+            (u.BACKUP_DIR / "c.bin").write_bytes(b"z" * 512)
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = u.cmd_du(argparse.Namespace())
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertIn("py", text)
+            self.assertIn("node", text)
+            self.assertIn("backups", text)
+            self.assertIn("total", text)
+            self.assertIn("2.0 KB", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

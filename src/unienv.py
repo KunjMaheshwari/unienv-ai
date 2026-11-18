@@ -520,9 +520,43 @@ def install_node(packages: list[str]) -> None:
 # ── generated files: shims, env.sh, manifest, agent files ───────────────────
 
 
+def prune_backups(keep: int = 10, min_age_days: int = 7) -> list[Path]:
+    """Keep the `keep` most recent backup snapshots and any newer than `min_age_days`; delete older ones."""
+    if not BACKUP_DIR.exists():
+        return []
+    snaps = sorted([p for p in BACKUP_DIR.iterdir() if p.is_dir()], key=lambda p: p.name)
+    keep_set = set(snaps[-keep:]) if keep > 0 else set()
+    cutoff = time.time() - (min_age_days * 86400)
+    removed = []
+    for s in snaps:
+        if s in keep_set:
+            continue
+        try:
+            ts = _dt.datetime.strptime(s.name[:15], "%Y%m%d-%H%M%S").timestamp()
+        except ValueError:
+            try:
+                ts = s.stat().st_mtime
+            except OSError:
+                continue
+        if ts < cutoff:
+            shutil.rmtree(s, ignore_errors=True)
+            removed.append(s)
+    return removed
+
+
 def write_shims() -> None:
     BIN.mkdir(parents=True, exist_ok=True)
     node = which("node") or "node"
+    tracker = BIN / ".shims"
+    prev_shims: set[str] = set()
+    if tracker.exists():
+        with contextlib.suppress(OSError):
+            prev_shims = {ln.strip() for ln in tracker.read_text().splitlines() if ln.strip()}
+    elif STATE_FILE.exists():
+        with contextlib.suppress(OSError, json.JSONDecodeError):
+            prev_shims = set(json.loads(STATE_FILE.read_text()).get("shims", []))
+
+    current_shims: list[str] = []
     for tpl in sorted(SHIMS_DIR.iterdir()):
         if tpl.name.startswith("."):
             continue
@@ -530,6 +564,15 @@ def write_shims() -> None:
         dst = BIN / tpl.name
         dst.write_text(text)
         dst.chmod(0o755)
+        current_shims.append(tpl.name)
+
+    for old in prev_shims - set(current_shims) - {"unienv", "ue"}:
+        stale = BIN / old
+        if stale.is_symlink() or stale.exists():
+            with contextlib.suppress(OSError):
+                stale.unlink()
+    atomic_write(tracker, "\n".join(current_shims) + ("\n" if current_shims else ""))
+
     # the CLI itself: always run with the interpreter that is running us now
     # (a uv-managed 3.12, never Homebrew's python), so it survives env breakage
     cli = BIN / "unienv"
@@ -756,12 +799,13 @@ def do_sync(
     recipes = active_recipes(recipes_all, state)
     w = wanted(recipes, state)
     write_shims()
+    prune_backups()
     write_env_sh(state)
     manifest = write_manifest(recipes, state, w)
     agents = sync_agents(manifest, recipes, only_detected=not all_agents)
     wired = wire_shells() if wire else []
     if not quiet:
-        info(f"  shims: {', '.join(sorted(p.name for p in BIN.iterdir()))}")
+        info(f"  shims: {', '.join(sorted(p.name for p in BIN.iterdir() if not p.name.startswith('.')))}")
         info(f"  agents configured: {', '.join(agents) or '(none detected)'}")
         if wired:
             info(f"  shell files updated: {', '.join(wired)}")
@@ -943,6 +987,7 @@ def cmd_need(args) -> int:
         log_event(event="need-failed", kind=kind, packages=new)
         return 1
     save_state(state)
+    prune_backups()
     do_sync(state, recipes_all, quiet=True)
     log_event(event="need", kind=kind, packages=new, curated=not uncurated)
     via = {"python": "ue-py", "node": "ue-node"}.get(kind, "PATH")
@@ -1523,6 +1568,49 @@ def cmd_uninstall(args) -> int:
     return 0
 
 
+def _dir_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file() or path.is_symlink():
+        try:
+            return path.lstat().st_size
+        except OSError:
+            return 0
+    total = 0
+    for root, _dirs, files in os.walk(path, followlinks=False):
+        rpath = Path(root)
+        for name in files:
+            try:
+                total += (rpath / name).lstat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _fmt_bytes(n: int) -> str:
+    val = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if val < 1024 or unit == "TB":
+            return f"{int(val)} B" if unit == "B" else f"{val:.1f} {unit}"
+        val /= 1024
+    return f"{int(n)} B"
+
+
+def cmd_du(args) -> int:
+    sections = [
+        ("py", PY_DIR),
+        ("node", NODE_DIR),
+        ("backups", BACKUP_DIR),
+    ]
+    if (UNIENV_HOME / "cache").exists():
+        sections.insert(2, ("cache", UNIENV_HOME / "cache"))
+    for label, path in sections:
+        info(f"  {label:<10} {_fmt_bytes(_dir_size(path)):>10}  ({path})")
+    total = _dir_size(UNIENV_HOME)
+    info(f"  {'total':<10} {_fmt_bytes(total):>10}  ({UNIENV_HOME})")
+    return 0
+
+
 # ── entry point ─────────────────────────────────────────────────────────────
 
 
@@ -1605,6 +1693,9 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
 
     s = sub.add_parser("path", help="print the UniEnv bin directory")
     s.set_defaults(fn=lambda a: print(BIN) or 0)
+
+    s = sub.add_parser("du", help="show disk usage of py, node, backups and total UNIENV_HOME")
+    s.set_defaults(fn=cmd_du)
 
     args = p.parse_args(argv)
     mutating = args.cmd in ("install", "need", "sync", "uninstall") or (args.cmd == "doctor" and args.fix)
