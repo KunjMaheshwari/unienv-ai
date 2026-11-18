@@ -15,6 +15,7 @@ stdout carries protocol messages only.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -78,6 +79,46 @@ PANDOC_OUT = {
     "epub": "epub",
 }
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp"}
+_INLINE_IMAGE_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+MAX_INLINE_IMAGES = 4
+MAX_INLINE_IMAGE_BYTES = 512 * 1024
+MAX_INLINE_TOTAL_BYTES = 2 * 1024 * 1024
+
+
+def _image_blocks(
+    paths: list[Path],
+    *,
+    max_images: int = MAX_INLINE_IMAGES,
+    max_file_bytes: int = MAX_INLINE_IMAGE_BYTES,
+    max_total_bytes: int = MAX_INLINE_TOTAL_BYTES,
+) -> list[dict]:
+    blocks: list[dict] = []
+    total = 0
+    for p in paths:
+        if len(blocks) >= max_images:
+            break
+        mime = _INLINE_IMAGE_MIME.get(p.suffix.lower())
+        if not mime:
+            continue
+        try:
+            raw = p.read_bytes()
+        except OSError:
+            continue
+        if not raw or len(raw) > max_file_bytes or total + len(raw) > max_total_bytes:
+            continue
+        total += len(raw)
+        blocks.append({"type": "image", "data": base64.b64encode(raw).decode("ascii"), "mimeType": mime})
+    return blocks
+
+
+def _with_images(text: str, image_blocks: list[dict]) -> str | list[dict]:
+    return [{"type": "text", "text": text}, *image_blocks] if image_blocks else text
 
 
 def log(msg: str) -> None:
@@ -290,12 +331,17 @@ def t_read_document(a: dict) -> str:
     if ext in {".txt", ".md", ".markdown", ".csv", ".json", ".yaml", ".yml", ".log", ".tsv", ".xml"}:
         return cap(path.read_text(errors="replace"), limit)
     if ext in IMAGE_EXT:
+        imgs = _image_blocks([path], max_file_bytes=MAX_INLINE_TOTAL_BYTES) if a.get("include_image") else []
         if not which("tesseract"):
+            if imgs:
+                return _with_images(f"[Image {path.name}]", imgs)
             raise ToolError("OCR needs tesseract: install_package(name='tesseract', kind='brew')")
         code, out, err, _ = run(["tesseract", str(path), "-"], cwd=path.parent, timeout=120)
         if code != 0:
+            if imgs:
+                return _with_images(f"[Image {path.name}]", imgs)
             raise ToolError(f"tesseract failed: {err.strip()[:500]}")
-        return cap(f"[OCR text of {path.name}]\n{out}", limit)
+        return _with_images(cap(f"[OCR text of {path.name}]\n{out}", limit), imgs)
     code, out, err, _ = run(
         [str(BIN / "ue-py"), *SAFE_PATH, "-m", "markitdown", str(path)], cwd=path.parent, timeout=180
     )
@@ -368,7 +414,9 @@ def t_convert_document(a: dict) -> str:
                 pages_dir = free_name(out_dir / f"{src.stem}-pages")
                 pages_dir.mkdir()
                 pages = [Path(shutil.move(p, pages_dir / p.name)) for p in sorted(Path(tmp).iterdir())]
-            return f"Rendered {len(pages)} page(s) into {pages_dir}:\n" + "\n".join(str(p) for p in pages)
+            summary = f"Rendered {len(pages)} page(s) into {pages_dir}:\n" + "\n".join(str(p) for p in pages)
+            imgs = _image_blocks(pages, max_file_bytes=MAX_INLINE_TOTAL_BYTES) if a.get("include_images", True) else []
+            return _with_images(summary, imgs)
         raise ToolError("PDF can be converted to txt, png or jpg. To get editable text, use read_document.")
 
     if fmt == "pdf":
@@ -392,7 +440,7 @@ def t_convert_document(a: dict) -> str:
     )
 
 
-def t_run_python(a: dict) -> str:
+def t_run_python(a: dict) -> str | list[dict]:
     cwd = workdir(a.get("cwd"))
     before = snapshot(cwd)
     with tempfile.NamedTemporaryFile("w", suffix=".py", prefix="unienv_", dir=tool_env()["TMPDIR"], delete=False) as f:
@@ -404,7 +452,12 @@ def t_run_python(a: dict) -> str:
         )
     finally:
         os.unlink(script)
-    return _report(code, out, err, secs, cwd, before)
+    report = _report(code, out, err, secs, cwd, before)
+    if a.get("include_images", True):
+        new_files = [Path(p) for p in changed_files(cwd, before)]
+        imgs = _image_blocks([p for p in new_files if p.suffix.lower() in {".png", ".jpg", ".jpeg"}])
+        return _with_images(report, imgs)
+    return report
 
 
 def allowed_tools() -> dict[str, str]:
@@ -487,6 +540,10 @@ TOOLS = [
             "properties": {
                 "path": {"type": "string", "description": "File path, e.g. ~/Downloads/report.pdf"},
                 "max_chars": {"type": "integer", "description": "Maximum characters to return (default 20000)"},
+                "include_image": {
+                    "type": "boolean",
+                    "description": "When reading an image file, also return the image itself inline",
+                },
             },
         },
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
@@ -507,6 +564,10 @@ TOOLS = [
                 "input_path": {"type": "string"},
                 "output_format": {"type": "string", "description": "pdf, docx, md, html, txt, xlsx, pptx, csv, png …"},
                 "output_dir": {"type": "string", "description": "Optional folder for the result"},
+                "include_images": {
+                    "type": "boolean",
+                    "description": "For PDF → PNG/JPG, attach up to 4 rendered page images inline (default true)",
+                },
             },
         },
         "annotations": {
@@ -532,6 +593,10 @@ TOOLS = [
                 "code": {"type": "string", "description": "Complete Python script"},
                 "cwd": {"type": "string", "description": "Working directory (default: the UniEnv working folder)"},
                 "timeout_s": {"type": "integer", "description": f"Default {DEFAULT_TIMEOUT}, max {MAX_TIMEOUT}"},
+                "include_images": {
+                    "type": "boolean",
+                    "description": "Attach newly created PNG/JPEG images inline (default true)",
+                },
             },
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True},
@@ -662,13 +727,14 @@ def handle(msg: dict) -> dict | None:
             return error(-32602, f"missing required argument(s): {', '.join(missing)}")
         start = time.monotonic()
         try:
-            text, is_error = tool["fn"](args), False
+            res, is_error = tool["fn"](args), False
         except ToolError as e:
-            text, is_error = str(e), True
+            res, is_error = str(e), True
         except Exception as e:  # never crash the server on a bad call
-            text, is_error = f"{type(e).__name__}: {e}", True
+            res, is_error = f"{type(e).__name__}: {e}", True
         log(f"{tool['name']} {'failed' if is_error else 'ok'} in {time.monotonic() - start:.1f}s")
-        return ok({"content": [{"type": "text", "text": text}], "isError": is_error})
+        content = res if isinstance(res, list) else [{"type": "text", "text": res}]
+        return ok({"content": content, "isError": is_error})
     if method in ("resources/list", "prompts/list"):
         return ok({method.split("/")[0]: []})
     return error(-32601, f"method not found: {method}")
