@@ -50,7 +50,7 @@ You ask your AI agent to *"fix the table in this Word file"* or *"summarise this
 > ⭐ **If UniEnv is useful to you, please [star the repo](https://github.com/rupeshbharambe24/unienv-ai/stargazers).** It's free, takes one click, and is the main way other people find the project.
 
 <p align="center">
-  <img src="docs/assets/demo.svg" alt="Terminal showing unienv status and unienv doctor: all good" width="780">
+  <img src="docs/assets/demo.svg" alt="Animated terminal recording comparing 'put this text in a Word document' without UniEnv (~22.4s, temp venv reinstall) vs with UniEnv ue-py (~9.6s, 2.3x faster, zero installs) and unienv doctor: all good" width="780">
 </p>
 
 ## ✨ Why UniEnv

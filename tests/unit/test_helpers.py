@@ -96,6 +96,28 @@ class HelperTests(unittest.TestCase):
                 with path.open("rb") as f:
                     self.assertEqual(u.validate_recipe(tomllib.load(f), path.stem), [])
 
+    def test_demo_svg_is_animated_and_referenced_in_readme(self):
+        import xml.etree.ElementTree as ET
+
+        svg_path = ROOT / "docs" / "assets" / "demo.svg"
+        self.assertTrue(svg_path.exists())
+        size = svg_path.stat().st_size
+        self.assertLess(size, 2 * 1024 * 1024)
+        raw = svg_path.read_text(encoding="utf-8")
+        root = ET.fromstring(raw)
+        self.assertTrue(root.tag.endswith("svg"))
+        self.assertIn("@keyframes", raw)
+        self.assertIn("<animate", raw)
+        self.assertIn("22.4s", raw)
+        self.assertIn("9.6s", raw)
+        self.assertIn("ue-py", raw)
+        self.assertIn("unienv doctor: all good", raw)
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn('src="docs/assets/demo.svg"', readme)
+        self.assertIn("22.4s", readme)
+        self.assertIn("9.6s", readme)
+
     def test_excluded_system_packages_and_bins(self):
         from unittest.mock import patch
 

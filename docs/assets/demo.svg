@@ -1,37 +1,113 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="610" viewBox="0 0 900 610" role="img" aria-labelledby="t">
-  <title id="t">unienv and unienv doctor output in a terminal</title>
-  <rect width="900" height="610" rx="14" fill="#0d1117"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="620" viewBox="0 0 900 620" role="img" aria-labelledby="demo-title demo-desc">
+  <title id="demo-title">Animated terminal recording: "put this text in a Word document" without UniEnv (~22.4s) vs with UniEnv ue-py (~9.6s, 2.3x faster) and unienv doctor</title>
+  <desc id="demo-desc">A 16-second looping terminal comparison showing an AI agent failing on ModuleNotFoundError and building a temporary virtualenv without UniEnv in 22.4 seconds, versus completing the same Word document task in 9.6 seconds using UniEnv's shared ue-py environment and verifying with unienv doctor: all good.</desc>
+  <style>
+    .mono { font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 13.5px; fill: #c9d1d9; }
+    .ui { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .dim { fill: #8b949e; }
+    .green { fill: #3fb950; }
+    .teal { fill: #5eead4; }
+    .red { fill: #f85149; }
+    .yellow { fill: #d29922; }
+    .blue { fill: #58a6ff; }
+    .bold { font-weight: 700; }
+
+    @keyframes reveal1 { 0%, 4% { opacity: 0; } 6%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    @keyframes reveal2 { 0%, 10% { opacity: 0; } 12%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    @keyframes reveal3 { 0%, 18% { opacity: 0; } 20%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    @keyframes reveal4 { 0%, 26% { opacity: 0; } 28%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    @keyframes reveal5 { 0%, 34% { opacity: 0; } 36%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    @keyframes reveal6 { 0%, 44% { opacity: 0; } 46%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    @keyframes reveal7 { 0%, 54% { opacity: 0; } 56%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    @keyframes reveal8 { 0%, 64% { opacity: 0; } 66%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    @keyframes reveal9 { 0%, 74% { opacity: 0; } 76%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    @keyframes blink { 0%, 49% { opacity: 0.85; } 50%, 100% { opacity: 0.15; } }
+
+    .s1 { animation: reveal1 16s infinite; }
+    .s2 { animation: reveal2 16s infinite; }
+    .s3 { animation: reveal3 16s infinite; }
+    .s4 { animation: reveal4 16s infinite; }
+    .s5 { animation: reveal5 16s infinite; }
+    .s6 { animation: reveal6 16s infinite; }
+    .s7 { animation: reveal7 16s infinite; }
+    .s8 { animation: reveal8 16s infinite; }
+    .s9 { animation: reveal9 16s infinite; }
+    .cursor { animation: blink 1s steps(2, start) infinite; }
+  </style>
+
+  <!-- Outer window -->
+  <rect width="900" height="620" rx="14" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
   <rect width="900" height="40" rx="14" fill="#161b22"/>
   <rect y="26" width="900" height="14" fill="#161b22"/>
   <circle cx="24" cy="20" r="6.5" fill="#ff5f57"/>
   <circle cx="46" cy="20" r="6.5" fill="#febc2e"/>
   <circle cx="68" cy="20" r="6.5" fill="#28c840"/>
-  <text x="450" y="25" text-anchor="middle" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" fill="#8b949e">zsh — unienv</text>
+  <text x="450" y="25" text-anchor="middle" class="ui dim" font-size="13">Task: "put this text in a Word document (report.docx)" — Without vs With UniEnv (16s loop)</text>
 
-  <g font-family="SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14.5" fill="#c9d1d9">
-    <text x="24" y="74"><tspan fill="#7ee787">$</tspan> unienv</text>
-    <text x="24" y="98"><tspan fill="#5eead4" font-weight="700">UniEnv AI</tspan> 0.1.0 <tspan dx="10" fill="#8b949e">one always-ready environment for every AI tool</tspan></text>
-    <text x="40" y="130" fill="#8b949e">home</text><text x="140" y="130">~/.unienv</text>
-    <text x="40" y="152" fill="#8b949e">batteries</text><text x="140" y="152">core, data, ocr, office, pdf</text>
-    <text x="40" y="174" fill="#8b949e">python</text><text x="140" y="174">ue-py · 24 packages</text>
-    <text x="40" y="196" fill="#8b949e">node</text><text x="140" y="196">ue-node · 2 packages</text>
-    <text x="40" y="218" fill="#8b949e">tools</text><text x="140" y="218">uv, node, rg, jq, tesseract, pandoc, soffice-safe, pdftotext, qpdf, gs</text>
-    <text x="40" y="240" fill="#8b949e">agents</text><text x="140" y="240">Claude Code, Codex CLI</text>
+  <!-- Split comparison cards -->
+  <!-- Left Panel: Without UniEnv -->
+  <rect x="20" y="54" width="422" height="270" rx="10" fill="#121720" stroke="#30363d" stroke-width="1"/>
+  <rect x="20" y="54" width="422" height="32" rx="10" fill="#1c2129"/>
+  <text x="34" y="75" class="ui bold red" font-size="12.5">WITHOUT UNIENV</text>
+  <text x="426" y="75" text-anchor="end" class="mono yellow bold" font-size="12.5">⏱ 22.4s · 5 turns</text>
 
-    <text x="24" y="280"><tspan fill="#7ee787">$</tspan> unienv doctor</text>
-    <text x="40" y="304" fill="#3fb950">✓</text><text x="60" y="304">Python 3.12.13 at ~/.unienv/py/.venv/bin/python</text>
-    <text x="40" y="326" fill="#3fb950">✓</text><text x="60" y="326">24 battery modules import cleanly</text>
-    <text x="40" y="348" fill="#3fb950">✓</text><text x="60" y="348">pandoc</text><text x="190" y="348">/opt/homebrew/bin/pandoc</text>
-    <text x="40" y="370" fill="#3fb950">✓</text><text x="60" y="370">soffice-safe</text><text x="190" y="370">~/.unienv/bin/soffice-safe</text>
-    <text x="40" y="392" fill="#3fb950">✓</text><text x="60" y="392">`zsh -c` finds ue-py</text>
-    <text x="40" y="414" fill="#3fb950">✓</text><text x="60" y="414">`bash -lc` finds ue-py</text>
-    <text x="40" y="436" fill="#3fb950">✓</text><text x="60" y="436">Claude Code: ~/.claude/CLAUDE.md</text>
-    <text x="40" y="458" fill="#3fb950">✓</text><text x="60" y="458">Codex CLI: ~/.codex/AGENTS.md</text>
-    <text x="40" y="480" fill="#58a6ff">i</text><text x="60" y="480"><tspan fill="#8b949e">/opt/homebrew/bin/python3 is externally managed (PEP 668)</tspan></text>
-    <text x="24" y="508"><tspan font-weight="700">unienv doctor: all good</tspan></text>
+  <!-- Left Progress Bar -->
+  <rect x="34" y="94" width="394" height="5" rx="2.5" fill="#21262d"/>
+  <rect x="34" y="94" width="0" height="5" rx="2.5" fill="#f85149">
+    <animate attributeName="width" values="0;394;394;0" keyTimes="0;0.45;0.94;1" dur="16s" repeatCount="indefinite"/>
+  </rect>
 
-    <text x="24" y="548"><tspan fill="#7ee787">$</tspan> ue need openpyxl</text>
-    <text x="24" y="572"><tspan fill="#3fb950">✓</tspan> already available: openpyxl</text>
-    <rect x="24" y="584" width="9" height="17" fill="#c9d1d9" opacity="0.8"/>
+  <g class="mono">
+    <text x="34" y="122" class="s1"><tspan class="green">$</tspan> python3 make_doc.py</text>
+    <text x="34" y="144" class="s2 red">✗ ModuleNotFoundError: No module named 'docx'</text>
+    <text x="34" y="168" class="s3"><tspan class="green">$</tspan> pip install python-docx</text>
+    <text x="34" y="190" class="s4 red">✗ error: externally-managed-environment (PEP 668)</text>
+    <text x="34" y="214" class="s5"><tspan class="green">$</tspan> python3 -m venv /tmp/venv-8f2a</text>
+    <text x="34" y="236" class="s5 dim">  &amp;&amp; /tmp/venv-8f2a/bin/pip install python-docx</text>
+    <text x="34" y="258" class="s6 dim">  Downloading python_docx-1.1.2... lxml-5.3.0...</text>
+    <text x="34" y="282" class="s6"><tspan class="green">$</tspan> /tmp/venv-8f2a/bin/python make_doc.py</text>
+    <text x="34" y="306" class="s7 yellow">✓ report.docx written (22.4s, temp venv lost next session)</text>
+  </g>
+
+  <!-- Right Panel: With UniEnv -->
+  <rect x="458" y="54" width="422" height="270" rx="10" fill="#121720" stroke="#238636" stroke-width="1"/>
+  <rect x="458" y="54" width="422" height="32" rx="10" fill="#13261e"/>
+  <text x="472" y="75" class="ui bold teal" font-size="12.5">WITH UNIENV (ue-py)</text>
+  <text x="864" y="75" text-anchor="end" class="mono green bold" font-size="12.5">⏱ 9.6s (2.3× faster) · 2 turns</text>
+
+  <!-- Right Progress Bar -->
+  <rect x="472" y="94" width="394" height="5" rx="2.5" fill="#21262d"/>
+  <rect x="472" y="94" width="0" height="5" rx="2.5" fill="#3fb950">
+    <animate attributeName="width" values="0;170;170;0" keyTimes="0;0.20;0.94;1" dur="16s" repeatCount="indefinite"/>
+  </rect>
+
+  <g class="mono">
+    <text x="472" y="122" class="s1"><tspan class="green">$</tspan> ue-py - &lt;&lt;'EOF'</text>
+    <text x="472" y="144" class="s1"><tspan class="blue">from</tspan> docx <tspan class="blue">import</tspan> Document</text>
+    <text x="472" y="166" class="s2">doc = Document()</text>
+    <text x="472" y="188" class="s2">doc.add_heading(<tspan class="teal">"Q4 Summary"</tspan>, 1)</text>
+    <text x="472" y="210" class="s2">doc.add_heading(<tspan class="teal">"Highlights"</tspan>, 2)</text>
+    <text x="472" y="232" class="s2">doc.save(<tspan class="teal">"report.docx"</tspan>)</text>
+    <text x="472" y="254" class="s2">EOF</text>
+    <text x="472" y="282" class="s3 green bold">✓ report.docx written in 9.6s (0 installs, shared env)</text>
+    <text x="472" y="306" class="s3 dim">  Available to Claude Code, Codex, Gemini CLI &amp; MCP</text>
+  </g>
+
+  <!-- Bottom Panel: unienv & unienv doctor -->
+  <rect x="20" y="338" width="860" height="264" rx="10" fill="#121720" stroke="#30363d" stroke-width="1"/>
+  <g class="mono">
+    <text x="36" y="366" class="s4"><tspan class="green">$</tspan> unienv</text>
+    <text x="36" y="388" class="s4"><tspan class="teal bold">UniEnv AI</tspan> 0.2.2 <tspan dx="8" class="dim">one always-ready environment for every AI tool</tspan></text>
+    <text x="52" y="410" class="s5 dim">batteries</text><text x="150" y="410" class="s5">core, data, ocr, office, pdf   (ue-py · 24 packages, ue-node · 2 packages)</text>
+    <text x="52" y="430" class="s5 dim">tools</text><text x="150" y="430" class="s5">uv, node, rg, jq, tesseract, pandoc, soffice-safe, pdftotext, qpdf, gs</text>
+
+    <text x="36" y="460" class="s6"><tspan class="green">$</tspan> unienv doctor</text>
+    <text x="52" y="482" class="s7"><tspan class="green">✓</tspan> Python 3.12.13 at ~/.unienv/py/.venv/bin/python (24 battery modules import cleanly)</text>
+    <text x="52" y="504" class="s7"><tspan class="green">✓</tspan> `zsh -c` and `bash -lc` find ue-py   <tspan class="green">✓</tspan> soffice-safe   <tspan class="green">✓</tspan> pandoc   <tspan class="green">✓</tspan> pdftotext</text>
+    <text x="52" y="526" class="s8"><tspan class="green">✓</tspan> Claude Code: ~/.claude/CLAUDE.md   <tspan class="green">✓</tspan> Codex CLI: ~/.codex/AGENTS.md</text>
+    <text x="36" y="552" class="s8 bold">unienv doctor: all good</text>
+
+    <text x="36" y="582" class="s9"><tspan class="green">$</tspan> ue need openpyxl <tspan dx="12" class="green">✓</tspan> already available: openpyxl</text>
+    <rect x="445" y="569" width="8" height="16" fill="#c9d1d9" class="cursor"/>
   </g>
 </svg>
