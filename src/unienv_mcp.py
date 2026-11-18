@@ -15,13 +15,17 @@ stdout carries protocol messages only.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 from pathlib import Path
@@ -191,27 +195,134 @@ def workdir(cwd: str | None) -> Path:
     return d
 
 
+_ORIG_SUBPROCESS_RUN = subprocess.run
+_LOCK = threading.Lock()
+_WRITE_LOCK = threading.Lock()
+_CURRENT_CTX = threading.local()
+_ACTIVE_PROCS: dict[object, subprocess.Popen] = {}
+_CANCELLED_IDS: set[object] = set()
+_IN_FLIGHT_TOOLS = 0
+
+
+def _send(payload: dict | list) -> None:
+    with _WRITE_LOCK:
+        sys.stdout.write(json.dumps(payload, ensure_ascii=True) + "\n")
+        sys.stdout.flush()
+
+
+def _terminate_proc(proc: subprocess.Popen) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(proc.pid, signal.SIGTERM)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=0.5)
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
+
+
+def cancel_request(request_id: object) -> bool:
+    """Mark request_id as cancelled and terminate any active subprocess group for it."""
+    if request_id is None:
+        return False
+    with _LOCK:
+        _CANCELLED_IDS.add(request_id)
+        proc = _ACTIVE_PROCS.get(request_id)
+    if proc is not None:
+        _terminate_proc(proc)
+        return True
+    return False
+
+
+def emit_progress(
+    progress: float,
+    total: float | None = None,
+    message: str | None = None,
+    *,
+    token: object = None,
+) -> None:
+    tok = getattr(_CURRENT_CTX, "progress_token", None) if token is None else token
+    if tok is None or isinstance(tok, bool) or not isinstance(tok, (str, int, float)):
+        return
+    params: dict[str, object] = {"progressToken": tok, "progress": progress}
+    if total is not None:
+        params["total"] = total
+    if message is not None:
+        params["message"] = message
+    _send({"jsonrpc": "2.0", "method": "notifications/progress", "params": params})
+
+
 def run(cmd: list[str], *, cwd: Path, timeout: int, env: dict[str, str] | None = None) -> tuple[int, str, str, float]:
     """Run without a shell, stdin closed (agent-safe), output captured and capped."""
     timeout = max(1, min(int(timeout or DEFAULT_TIMEOUT), MAX_TIMEOUT))
+    run_env = tool_env() if env is None else env
     start = time.monotonic()
+    if subprocess.run is not _ORIG_SUBPROCESS_RUN:
+        try:
+            r = subprocess.run(
+                cmd,
+                cwd=cwd,
+                env=run_env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=timeout,
+            )
+            return r.returncode, r.stdout, r.stderr, time.monotonic() - start
+        except subprocess.TimeoutExpired as e:
+            partial = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            return (
+                124,
+                partial,
+                f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})",
+                time.monotonic() - start,
+            )
+        except FileNotFoundError:
+            return 127, "", f"command not found: {cmd[0]}", time.monotonic() - start
     try:
-        r = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=cwd,
-            env=tool_env() if env is None else env,
+            env=run_env,
             stdin=subprocess.DEVNULL,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             errors="replace",
-            timeout=timeout,
+            start_new_session=True,
         )
-        code, out, err = r.returncode, r.stdout, r.stderr
-    except subprocess.TimeoutExpired as e:
-        partial = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        code, out, err = 124, partial, f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})"
     except FileNotFoundError:
-        code, out, err = 127, "", f"command not found: {cmd[0]}"
+        return 127, "", f"command not found: {cmd[0]}", time.monotonic() - start
+
+    req_id = getattr(_CURRENT_CTX, "request_id", None)
+    if req_id is not None:
+        with _LOCK:
+            already_cancelled = req_id in _CANCELLED_IDS
+            if not already_cancelled:
+                _ACTIVE_PROCS[req_id] = proc
+        if already_cancelled:
+            _terminate_proc(proc)
+            out, _ = proc.communicate()
+            return 130, out or "", "cancelled", time.monotonic() - start
+
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        code = proc.returncode
+    except subprocess.TimeoutExpired as e:
+        _terminate_proc(proc)
+        out, _ = proc.communicate()
+        if not out and e.stdout:
+            out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else e.stdout
+        code, out, err = 124, out or "", f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})"
+    finally:
+        if req_id is not None:
+            with _LOCK:
+                _ACTIVE_PROCS.pop(req_id, None)
+
+    if req_id is not None:
+        with _LOCK:
+            was_cancelled = req_id in _CANCELLED_IDS
+        if was_cancelled:
+            return 130, out or "", "cancelled", time.monotonic() - start
     return code, out, err, time.monotonic() - start
 
 
@@ -611,6 +722,10 @@ def handle(msg: dict) -> dict | None:
     if has_id and not _valid_id(raw_id):
         return _invalid_request(None)
     if not has_id:  # notification (initialized, cancelled, ...): nothing to send back
+        if msg.get("method") == "notifications/cancelled":
+            raw_params = msg.get("params")
+            if isinstance(raw_params, dict) and "requestId" in raw_params:
+                cancel_request(raw_params["requestId"])
         return None
     method = msg["method"]
 
@@ -660,13 +775,29 @@ def handle(msg: dict) -> dict | None:
         missing = [k for k in tool["inputSchema"].get("required", []) if k not in args]
         if missing:
             return error(-32602, f"missing required argument(s): {', '.join(missing)}")
+        meta = params.get("_meta")
+        progress_token = meta.get("progressToken") if isinstance(meta, dict) else None
+        _CURRENT_CTX.request_id = mid
+        _CURRENT_CTX.progress_token = progress_token
         start = time.monotonic()
         try:
+            with _LOCK:
+                pre_cancelled = mid is not None and mid in _CANCELLED_IDS
+            if pre_cancelled:
+                raise ToolError("cancelled")
+            emit_progress(0, 1, f"Starting {tool['name']}")
             text, is_error = tool["fn"](args), False
+            emit_progress(1, 1, f"Completed {tool['name']}")
         except ToolError as e:
             text, is_error = str(e), True
         except Exception as e:  # never crash the server on a bad call
             text, is_error = f"{type(e).__name__}: {e}", True
+        finally:
+            _CURRENT_CTX.request_id = None
+            _CURRENT_CTX.progress_token = None
+            if mid is not None:
+                with _LOCK:
+                    _CANCELLED_IDS.discard(mid)
         log(f"{tool['name']} {'failed' if is_error else 'ok'} in {time.monotonic() - start:.1f}s")
         return ok({"content": [{"type": "text", "text": text}], "isError": is_error})
     if method in ("resources/list", "prompts/list"):
@@ -692,8 +823,53 @@ def _safe_handle(msg) -> dict | None:
         }
 
 
+class _RawReply:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+
+def _dispatch_message(msg) -> dict | list | None:
+    global _IN_FLIGHT_TOOLS
+    if isinstance(msg, _RawReply):
+        return msg.payload
+    if isinstance(msg, list):
+        if not msg:
+            return _invalid_request()
+        replies = [r for r in (_safe_handle(m) for m in msg) if r is not None]
+        return replies or None
+    is_tool_call = isinstance(msg, dict) and msg.get("method") == "tools/call"
+    if is_tool_call:
+        with _LOCK:
+            _IN_FLIGHT_TOOLS += 1
+    try:
+        return _safe_handle(msg)
+    finally:
+        if is_tool_call:
+            with _LOCK:
+                _IN_FLIGHT_TOOLS -= 1
+
+
 def serve() -> int:
     log(f"started (UniEnv home {UNIENV_HOME}, working folder {WORKDIR})")
+    work_q: queue.Queue = queue.Queue()
+    stop = object()
+
+    def _worker() -> None:
+        while True:
+            item = work_q.get()
+            if item is stop:
+                work_q.task_done()
+                break
+            try:
+                reply = _dispatch_message(item)
+                if reply:
+                    _send(reply)
+            finally:
+                work_q.task_done()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -701,19 +877,29 @@ def serve() -> int:
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
-            reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}
-        else:
-            if isinstance(msg, list):
-                if not msg:
-                    reply = _invalid_request()
-                else:
-                    replies = [r for r in (_safe_handle(m) for m in msg) if r is not None]
-                    reply = replies or None
-            else:
-                reply = _safe_handle(msg)
-        if reply:
-            sys.stdout.write(json.dumps(reply, ensure_ascii=True) + "\n")
-            sys.stdout.flush()
+            work_q.put(_RawReply({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}))
+            continue
+        if isinstance(msg, dict) and "id" not in msg and msg.get("method") == "notifications/cancelled":
+            _safe_handle(msg)
+            continue
+        with _LOCK:
+            busy = _IN_FLIGHT_TOOLS > 0
+        if (
+            busy
+            and isinstance(msg, dict)
+            and msg.get("jsonrpc") == "2.0"
+            and msg.get("method") == "ping"
+            and "id" in msg
+            and _valid_id(msg.get("id"))
+        ):
+            reply = _safe_handle(msg)
+            if reply:
+                _send(reply)
+            continue
+        work_q.put(msg)
+
+    work_q.put(stop)
+    worker.join()
     return 0
 
 
