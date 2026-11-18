@@ -1271,9 +1271,27 @@ def cmd_doctor(args) -> int:
             )
 
     # MCP server for desktop apps: configured clients must point at a server that answers
-    configured = [
-        n for n, p in mcp_clients().items() if p.exists() and "unienv" in (_load_json(p).get("mcpServers") or {})
-    ]
+    configured = []
+    for n, p in mcp_clients().items():
+        if not p.exists():
+            continue
+        try:
+            raw = p.read_text(encoding="utf-8", errors="replace").strip()
+            data = json.loads(raw) if raw else {}
+        except (OSError, json.JSONDecodeError):
+            add(f"mcp:{n}", "warn", f"{p} is not valid JSON; can't check the unienv entry")
+            continue
+        if not isinstance(data, dict):
+            add(f"mcp:{n}", "warn", f"{p} is not a JSON object; can't check the unienv entry")
+            continue
+        servers = data.get("mcpServers")
+        if servers is None:
+            continue
+        if not isinstance(servers, dict):
+            add(f"mcp:{n}", "warn", f"{p} has invalid mcpServers (expected an object); can't check the unienv entry")
+            continue
+        if "unienv" in servers:
+            configured.append(n)
     if configured:
         ok, detail, secs = mcp_handshake()
         if ok:
