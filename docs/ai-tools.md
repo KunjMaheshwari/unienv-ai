@@ -28,6 +28,26 @@ Run `unienv sync --all-agents` to write instruction files even for tools that ar
 
 **Desktop apps** don't start a shell and get the system's minimal PATH. That's why MCP servers configured as `npx …` or `uvx …` fail with `spawn ENOENT`. Use absolute paths, for example `"command": "/Users/you/.unienv/bin/ue-py"`.
 
+## Cloud agents, Docker & Dev Containers
+
+For cloud coding agents (Codex cloud, GitHub Copilot coding agent, containerized sandboxes) and VS Code Dev Containers:
+
+- **Docker image (`Dockerfile`)**: Builds on `debian:bookworm-slim`, installs default UniEnv batteries, wires `/root/.unienv/bin` into `PATH` and `BASH_ENV`, and populates `AGENTS.md` and `CLAUDE.md` in the home directory:
+  ```bash
+  docker build -t unienv-ai .
+  docker run --rm -it unienv-ai unienv status
+  ```
+- **Dev Container Feature (`.devcontainer/unienv`)**: Add UniEnv to `.devcontainer/devcontainer.json` with optional `batteries` selection:
+  ```json
+  {
+    "features": {
+      "ghcr.io/rupeshbharambe24/unienv/unienv:0": {
+        "batteries": "office,pdf,data"
+      }
+    }
+  }
+  ```
+
 ## Adding a tool
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md#writing-an-agent-adapter). An adapter is a few lines in `agent_targets()` in `src/unienv.py`, plus links to the tool's official docs proving the paths.
