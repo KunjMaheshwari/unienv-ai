@@ -503,11 +503,13 @@ def write_package_json(packages: list[str]) -> None:
     pj.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def install_node(packages: list[str]) -> None:
+def install_node(packages: list[str], *, require_npm: bool = False) -> None:
     if not packages:
         return
     npm = which("npm")
     if not npm:
+        if require_npm:
+            raise RuntimeError("npm not found: install Node.js (`unienv need --bin node`)")
         warn("npm not found; skipping Node batteries (install Node.js, then `unienv install`).")
         return
     write_package_json(packages)
@@ -917,7 +919,7 @@ def cmd_need(args) -> int:
         if kind == "python":
             install_python(w["python"])
         elif kind == "node":
-            install_node(w["node"])
+            install_node(w["node"], require_npm=True)
         else:
             failed = install_system(
                 {
