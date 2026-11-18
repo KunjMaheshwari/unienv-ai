@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 import tomllib
 from pathlib import Path
@@ -1127,9 +1128,41 @@ def mcp_handshake(timeout: float = 15) -> tuple[bool, str, float]:
         return False, f"{type(e).__name__}: {e}", time.monotonic() - start
 
 
+def _safe_extract_tar(tar: tarfile.TarFile, dest: Path) -> None:
+    """Extract a tarball safely on both Python 3.11.4+ (filter='data') and 3.11.0-3.11.3."""
+    dest_path = Path(dest).resolve()
+    if getattr(tarfile, "data_filter", None) is not None:
+        tar.extractall(dest_path, filter="data")
+        return
+    for member in tar.getmembers():
+        name = member.name
+        p = Path(name)
+        if name.startswith("/") or p.is_absolute() or ".." in p.parts:
+            raise ValueError(f"unsafe tar member path: {name!r}")
+        if member.isdev() or member.isfifo() or member.ischr() or member.isblk():
+            raise ValueError(f"unsafe tar special member: {name!r}")
+        target = (dest_path / name).resolve()
+        if target != dest_path and dest_path not in target.parents:
+            raise ValueError(f"tar member escapes destination: {name!r}")
+        if member.issym() or member.islnk():
+            link_name = member.linkname
+            lp = Path(link_name)
+            if link_name.startswith("/") or lp.is_absolute():
+                raise ValueError(f"unsafe tar link target: {name!r} -> {link_name!r}")
+            link_base = dest_path if member.islnk() else (dest_path / name).parent
+            link_target = (link_base / link_name).resolve()
+            if link_target != dest_path and dest_path not in link_target.parents:
+                raise ValueError(f"tar link escapes destination: {name!r} -> {link_name!r}")
+    with contextlib.ExitStack() as stack:
+        if hasattr(tar, "extraction_filter"):
+            orig_filter = tar.extraction_filter
+            tar.extraction_filter = staticmethod(lambda member, path: member)
+            stack.callback(setattr, tar, "extraction_filter", orig_filter)
+        tar.extractall(dest_path)
+
+
 def cmd_update(args) -> int:
     """Download the latest UniEnv, replace ~/.unienv/share, then re-run install with the new code."""
-    import tarfile
     import tempfile
     import urllib.request
 
@@ -1142,7 +1175,7 @@ def cmd_update(args) -> int:
         archive = Path(tmp) / "unienv.tar.gz"
         urllib.request.urlretrieve(url, archive)
         with tarfile.open(archive) as tar:
-            tar.extractall(tmp, filter="data")
+            _safe_extract_tar(tar, Path(tmp))
         src = next(Path(tmp).glob("unienv-ai-*"))
         new_share = UNIENV_HOME / "share.new"
         shutil.rmtree(new_share, ignore_errors=True)
