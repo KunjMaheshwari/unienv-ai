@@ -99,3 +99,27 @@ jobs:
           jq -e '.extras.python | index("tomli-w") and index("six")' ~/.unienv/state.json
           ! ~/.unienv/bin/unienv need this-package-does-not-exist-unienv-ci
           ~/.unienv/bin/unienv doctor
+
+      - name: Piped install, unienv update, and exact dotfile restore on uninstall
+        run: |
+          ~/.unienv/bin/unienv uninstall
+          mkdir -p ~/.claude
+          printf 'export ZSH_USER_VAR=1\nalias ll="ls -l"\n' > ~/.zshenv
+          printf 'export PROFILE_VAR=1\n' > ~/.profile
+          printf 'export BASHRC_VAR=1\n' > ~/.bashrc
+          printf '# My Claude instructions\nAlways run tests.\n' > ~/.claude/CLAUDE.md
+          cp ~/.zshenv ~/.zshenv.expected
+          cp ~/.profile ~/.profile.expected
+          cp ~/.bashrc ~/.bashrc.expected
+          cp ~/.claude/CLAUDE.md ~/.claude/CLAUDE.md.expected
+
+          REF="${GITHUB_HEAD_REF:-main}"
+          cat install.sh | UNIENV_REF="$REF" bash -s -- --no-system --exclude libreoffice
+          ~/.unienv/bin/unienv update --ref "$REF"
+          ~/.unienv/bin/unienv doctor
+          ~/.unienv/bin/unienv uninstall
+
+          cmp -s ~/.zshenv ~/.zshenv.expected
+          cmp -s ~/.profile ~/.profile.expected
+          cmp -s ~/.bashrc ~/.bashrc.expected
+          cmp -s ~/.claude/CLAUDE.md ~/.claude/CLAUDE.md.expected
