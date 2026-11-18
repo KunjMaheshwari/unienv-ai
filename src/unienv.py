@@ -706,6 +706,18 @@ def agent_targets() -> list[dict]:
             "instructions": HOME / ".config/opencode/AGENTS.md",
             "skills": None,
         },
+        {
+            # https://docs.cursor.com/context/rules
+            "id": "cursor",
+            "name": "Cursor",
+            "detect": [HOME / ".cursor"],
+            "bin": "cursor",
+            "instructions": HOME / ".cursor/rules/unienv.mdc",
+            "skills": None,
+            "frontmatter": (
+                "---\ndescription: UniEnv AI shared environment (ue-py, ue-node, system tools)\nalwaysApply: true\n---"
+            ),
+        },
     ]
 
 
@@ -722,6 +734,12 @@ def sync_agents(manifest: dict, recipes: list[dict], *, only_detected: bool = Tr
         if only_detected and not detected(a):
             continue
         try:
+            fm = a.get("frontmatter")
+            if fm and (
+                not a["instructions"].exists() or not _read_block_text(a["instructions"])[0].lstrip().startswith("---")
+            ):
+                old, eol = _read_block_text(a["instructions"]) if a["instructions"].exists() else ("", os.linesep)
+                _write_block_text(a["instructions"], fm.rstrip() + "\n" + ("\n" + old if old else ""), eol)
             upsert_block(a["instructions"], block, MD_BEGIN, MD_END)
             if a["skills"] is not None:
                 d = a["skills"] / "unienv"
@@ -1496,6 +1514,11 @@ def cmd_uninstall(args) -> int:
     for a in agent_targets():
         try:
             if remove_block(a["instructions"], MD_BEGIN, MD_END):
+                fm = a.get("frontmatter", "").strip()
+                if fm and a["instructions"].exists():
+                    rem = a["instructions"].read_text(encoding="utf-8", errors="surrogateescape").strip()
+                    if rem in ("", fm):
+                        a["instructions"].unlink()
                 info(f"  removed block from {a['instructions']}")
         except OSError as e:
             warn(f"could not update {a['instructions']} ({e}); remove the UniEnv block manually")
