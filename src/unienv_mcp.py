@@ -573,7 +573,6 @@ def handle(msg: dict) -> dict | None:
 
 
 def serve() -> int:
-    WORKDIR.mkdir(parents=True, exist_ok=True)
     log(f"started (UniEnv home {UNIENV_HOME}, working folder {WORKDIR})")
     for line in sys.stdin:
         line = line.strip()

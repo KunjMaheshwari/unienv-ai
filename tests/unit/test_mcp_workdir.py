@@ -100,10 +100,49 @@ class WorkdirResolutionTests(unittest.TestCase):
                     )
                     self.assertEqual(proc.returncode, 0, proc.stderr)
                     expected_dir = (home / expected_subpath).resolve()
-                    self.assertTrue(expected_dir.is_dir())
+                    self.assertFalse(expected_dir.exists())
                     self.assertIn(f"working folder {expected_dir}", proc.stderr)
                     reply = json.loads(proc.stdout.strip())
                     self.assertIn(str(expected_dir), reply["result"]["instructions"])
+
+    def test_mcp_starts_when_workdir_parent_is_a_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            blocker = home / "blocker"
+            blocker.write_text("not a directory\n")
+            uncreatable = blocker / "child"
+            env = {
+                "HOME": str(home),
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "UNIENV_HOME": str(home / ".unienv"),
+                "UNIENV_WORKDIR": str(uncreatable),
+            }
+            msgs = [
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1"},
+                    },
+                },
+                {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+            ]
+            proc = subprocess.run(
+                [sys.executable, str(MCP_PATH)],
+                input="\n".join(map(json.dumps, msgs)) + "\n",
+                cwd="/",
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            replies = {m["id"]: m for m in map(json.loads, proc.stdout.splitlines())}
+            self.assertEqual(replies[2]["result"], {})
+            self.assertIn(str(uncreatable.resolve()), replies[1]["result"]["instructions"])
 
 
 if __name__ == "__main__":
