@@ -199,8 +199,10 @@ Details: [How it works](docs/how-it-works.md) · [AI tool integrations](docs/ai-
 | Codex CLI | ✅ instructions + skill + shell |
 | Gemini CLI | ✅ instructions + shell |
 | OpenCode | ✅ instructions + shell |
+| Cline | ✅ global rules (`~/Documents/Cline/Rules/unienv.md`) + shell |
+| Roo Code | ✅ global rules (`~/.roo/rules/unienv.md`) + shell |
 | Cursor | ◐ shell works, MCP via `unienv mcp install --client cursor`; paste `~/.unienv/AGENTS.md` into User Rules ([adapter wanted](https://github.com/rupeshbharambe24/unienv-ai/issues/4)) |
-| Windsurf, Cline, Roo, Copilot, Aider | ◐ shell works; paste `~/.unienv/AGENTS.md` into user rules. [Adapters wanted](https://github.com/rupeshbharambe24/unienv-ai/labels/adapter) |
+| Windsurf, Copilot, Aider | ◐ shell works; paste `~/.unienv/AGENTS.md` into user rules. [Adapters wanted](https://github.com/rupeshbharambe24/unienv-ai/labels/adapter) |
 | **Claude Desktop chat** | ✅ via the UniEnv MCP server: `unienv mcp install` or the one-click `.mcpb` extension ([guide](docs/mcp.md)) |
 | LM Studio & other MCP apps | ✅ via MCP: `unienv mcp config` prints the snippet |
 | Claude.ai / ChatGPT on the web, Cowork | ❌ they run in the cloud or a VM and can't reach your computer |

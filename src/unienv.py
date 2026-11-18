@@ -671,6 +671,14 @@ def render_skill(manifest: dict, recipes: list[dict]) -> str:
     )
 
 
+def _vscode_ext_dirs(prefix: str) -> list[Path]:
+    out: list[Path] = []
+    for ext_root in (HOME / ".vscode/extensions", HOME / ".vscode-server/extensions"):
+        if ext_root.is_dir():
+            out.extend(sorted(ext_root.glob(f"{prefix}*")))
+    return out
+
+
 def agent_targets() -> list[dict]:
     codex_home = Path(os.environ.get("CODEX_HOME", HOME / ".codex"))
     return [
@@ -706,11 +714,29 @@ def agent_targets() -> list[dict]:
             "instructions": HOME / ".config/opencode/AGENTS.md",
             "skills": None,
         },
+        {
+            # https://docs.cline.bot/features/cline-rules
+            "id": "cline",
+            "name": "Cline",
+            "detect": [HOME / "Documents/Cline", HOME / ".cline", *_vscode_ext_dirs("saoudrizwan.claude-dev")],
+            "bin": "cline",
+            "instructions": HOME / "Documents/Cline/Rules/unienv.md",
+            "skills": None,
+        },
+        {
+            # https://docs.roocode.com/features/custom-instructions
+            "id": "roo-code",
+            "name": "Roo Code",
+            "detect": [HOME / ".roo", *_vscode_ext_dirs("rooveterinaryinc.roo-cline")],
+            "bin": None,
+            "instructions": HOME / ".roo/rules/unienv.md",
+            "skills": None,
+        },
     ]
 
 
 def detected(agent: dict) -> bool:
-    return any(p.exists() for p in agent["detect"]) or bool(which(agent["bin"]))
+    return any(p.exists() for p in agent["detect"]) or bool(agent.get("bin") and which(agent["bin"]))
 
 
 def sync_agents(manifest: dict, recipes: list[dict], *, only_detected: bool = True) -> list[str]:

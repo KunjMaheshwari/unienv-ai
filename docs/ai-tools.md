@@ -11,8 +11,10 @@ UniEnv reaches AI tools in two ways:
 | **Codex CLI** | `$CODEX_HOME/AGENTS.md` (default `~/.codex/AGENTS.md`) | `~/.codex/skills/unienv/SKILL.md` | `~/.codex/` or `codex` |
 | **Gemini CLI** | `~/.gemini/GEMINI.md` | none | `~/.gemini/` or `gemini` |
 | **OpenCode** | `~/.config/opencode/AGENTS.md` | none | `~/.config/opencode/` or `opencode` |
+| **Cline** | `~/Documents/Cline/Rules/unienv.md` ([docs](https://docs.cline.bot/features/cline-rules)) | none | `~/Documents/Cline/`, `~/.cline/`, `cline` CLI, or VS Code extension `saoudrizwan.claude-dev*` |
+| **Roo Code** | `~/.roo/rules/unienv.md` ([docs](https://docs.roocode.com/features/custom-instructions)) | none | `~/.roo/` or VS Code extension `rooveterinaryinc.roo-cline*` |
 | **Cursor** | paste `~/.unienv/AGENTS.md` into *Settings → Rules → User Rules*; MCP tools via `unienv mcp install --client cursor` | none | manual for now ([#4](https://github.com/rupeshbharambe24/unienv-ai/issues/4)) |
-| **Windsurf, Cline, Roo, Copilot, Aider** | paste `~/.unienv/AGENTS.md` into the tool's global rules | none | adapters planned, help wanted |
+| **Windsurf, Copilot, Aider** | paste `~/.unienv/AGENTS.md` into the tool's global rules | none | adapters planned, help wanted |
 | **Claude Desktop chat** | **UniEnv MCP server**: `unienv mcp install` or the `.mcpb` extension ([guide](mcp.md)) | n/a | config file |
 | **LM Studio, other MCP apps** | MCP server via `unienv mcp config` | n/a | manual |
 
@@ -25,6 +27,8 @@ Run `unienv sync --all-agents` to write instruction files even for tools that ar
 **Codex CLI** runs commands through a login shell by default, which reads `~/.profile` (or `~/.bash_profile`). In `workspace-write` sandbox mode, network access is off by default. `unienv need` from inside Codex may need approval to reach PyPI or Homebrew.
 
 **Gemini CLI** loads `~/.gemini/GEMINI.md` as global context.
+
+**Cline and Roo Code** are VS Code extensions (plus the Cline CLI) that load every Markdown file in their global rules folder: `~/Documents/Cline/Rules/unienv.md` for [Cline](https://docs.cline.bot/features/cline-rules) and `~/.roo/rules/unienv.md` for [Roo Code](https://docs.roocode.com/features/custom-instructions). Both extensions execute commands in VS Code's integrated terminal and rely on shell integration escape sequences to detect when a command finishes. UniEnv's `~/.zshenv` block only sets `PATH` and environment variables without emitting output or modifying `$PROMPT`/`PS1`, so it works cleanly with VS Code terminal integration. If command-completion detection hangs in Cline or Roo Code, keep heavy prompts (such as Powerlevel10k instant prompt) in `~/.zshrc` rather than `~/.zshenv`.
 
 **Desktop apps** don't start a shell and get the system's minimal PATH. That's why MCP servers configured as `npx …` or `uvx …` fail with `spawn ENOENT`. Use absolute paths, for example `"command": "/Users/you/.unienv/bin/ue-py"`.
 
