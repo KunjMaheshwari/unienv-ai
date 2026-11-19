@@ -137,9 +137,7 @@ class McpSafeModeTests(unittest.TestCase):
                 alias = source_dir / "alias"
                 alias.symlink_to(rejected, target_is_directory=True)
                 with self.assertRaisesRegex(mcp.ToolError, "readonly conversions"):
-                    mcp.t_convert_document(
-                        {"input_path": str(src), "output_format": "docx", "output_dir": str(alias)}
-                    )
+                    mcp.t_convert_document({"input_path": str(src), "output_format": "docx", "output_dir": str(alias)})
                 self.assertFalse(rejected.exists())
 
     def test_conversion_does_not_write_through_dangling_output_symlinks(self):
