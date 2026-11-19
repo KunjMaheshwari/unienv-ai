@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
 
 jobs:
   lint:
@@ -99,3 +102,25 @@ jobs:
           jq -e '.extras.python | index("tomli-w") and index("six")' ~/.unienv/state.json
           ! ~/.unienv/bin/unienv need this-package-does-not-exist-unienv-ci
           ~/.unienv/bin/unienv doctor
+
+  libreoffice:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system packages including LibreOffice
+        run: |
+          brew install pandoc poppler qpdf ghostscript tesseract duckdb jq ripgrep
+          brew install --cask libreoffice
+          ./install.sh --no-system
+
+      - name: Doctor with LibreOffice enabled
+        run: ~/.unienv/bin/unienv doctor
+
+      - name: Smoke test with LibreOffice conversions
+        run: env -i HOME="$HOME" USER="$USER" PATH=/usr/bin:/bin bash -lc tests/smoke.sh
+
+      - name: MCP server end-to-end with LibreOffice conversions
+        run: python3 tests/mcp_test.py
