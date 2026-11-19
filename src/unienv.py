@@ -1006,7 +1006,7 @@ def cmd_status(args) -> int:
     return 0
 
 
-REPO_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/archive/refs/heads/{ref}.tar.gz"
+REPO_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/archive/{ref}.tar.gz"
 
 
 # ── MCP server for desktop apps ─────────────────────────────────────────────
@@ -1131,6 +1131,7 @@ def cmd_update(args) -> int:
     """Download the latest UniEnv, replace ~/.unienv/share, then re-run install with the new code."""
     import tarfile
     import tempfile
+    import urllib.error
     import urllib.request
 
     share = UNIENV_HOME / "share"
@@ -1140,7 +1141,11 @@ def cmd_update(args) -> int:
     step(f"Downloading {url}")
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "unienv.tar.gz"
-        urllib.request.urlretrieve(url, archive)
+        try:
+            with urllib.request.urlopen(url) as resp, archive.open("wb") as out:
+                shutil.copyfileobj(resp, out)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+            die(f"could not download UniEnv ref {args.ref!r} ({e}); check the branch or tag name")
         with tarfile.open(archive) as tar:
             tar.extractall(tmp, filter="data")
         src = next(Path(tmp).glob("unienv-ai-*"))
