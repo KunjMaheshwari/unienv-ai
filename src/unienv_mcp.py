@@ -310,6 +310,12 @@ def t_read_document(a: dict) -> str:
     raise ToolError(f"could not read {path.name}: {(err or 'no text extracted').strip()[:800]}")
 
 
+# CSV options: token 9 preserves displayed values; token 12 exports every sheet.
+# https://help.libreoffice.org/latest/en-US/text/shared/guide/csv_params.html
+_CSV_ALL_SHEETS_FILTER = "csv:Text - txt - csv (StarCalc):44,34,UTF8,1,,0,false,true,true,false,false,-1"
+_SPREADSHEET_EXT = {".xlsx", ".xls", ".ods"}
+
+
 def t_convert_document(a: dict) -> str:
     src = resolve(a["input_path"])
     if not src.exists():
@@ -321,16 +327,28 @@ def t_convert_document(a: dict) -> str:
     ext = src.suffix.lower()
     soffice = BIN / "soffice-safe"
 
-    def via_soffice(input_path: Path, target_fmt: str) -> Path:
+    def via_soffice(input_path: Path, target_fmt: str) -> list[Path]:
         with tempfile.TemporaryDirectory(dir=tool_env()["TMPDIR"]) as tmp:
             code, out, err, _ = run(
                 [str(soffice), "--convert-to", target_fmt, "--outdir", tmp, str(input_path)], cwd=Path(tmp), timeout=300
             )
-            produced = list(Path(tmp).glob(f"*.{target_fmt.split(':')[0]}"))
+            produced = sorted(Path(tmp).glob(f"*.{target_fmt.split(':')[0]}"))
             if code != 0 or not produced:
                 raise ToolError(f"LibreOffice conversion failed: {(err or out).strip()[:800] or 'no output'}")
-            shutil.move(str(produced[0]), dest)
-        return dest
+            if len(produced) == 1:
+                shutil.move(str(produced[0]), dest)
+                return [dest]
+            moved = []
+            for p in produced:
+                target = free_name(out_dir / p.name)
+                shutil.move(str(p), target)
+                moved.append(target)
+            return moved
+
+    def format_converted(paths: list[Path]) -> str:
+        if len(paths) == 1:
+            return f"Converted to {paths[0]}"
+        return f"Converted to {len(paths)} files:\n" + "\n".join(str(p) for p in paths)
 
     def via_pandoc(input_path: Path, to: str, target: Path) -> Path:
         code, out, err, _ = run(
@@ -373,17 +391,18 @@ def t_convert_document(a: dict) -> str:
 
     if fmt == "pdf":
         if ext in OFFICE_EXT:
-            return f"Converted to {via_soffice(src, 'pdf')}"
+            return format_converted(via_soffice(src, "pdf"))
         if ext in PANDOC_IN:  # pandoc → docx → LibreOffice → pdf (no LaTeX needed)
             with tempfile.TemporaryDirectory(dir=tool_env()["TMPDIR"]) as tmp:
                 mid = via_pandoc(src, "docx", Path(tmp) / f"{src.stem}.docx")
-                return f"Converted to {via_soffice(mid, 'pdf')}"
+                return format_converted(via_soffice(mid, "pdf"))
     if (
         ext in OFFICE_EXT
         and fmt in {"docx", "xlsx", "pptx", "odt", "ods", "odp", "csv", "html"}
         and not (ext == ".docx" and fmt in PANDOC_OUT)
     ):
-        return f"Converted to {via_soffice(src, fmt)}"
+        target_fmt = _CSV_ALL_SHEETS_FILTER if fmt == "csv" and ext in _SPREADSHEET_EXT else fmt
+        return format_converted(via_soffice(src, target_fmt))
     if ext in PANDOC_IN and fmt in PANDOC_OUT:
         return f"Converted to {via_pandoc(src, PANDOC_OUT[fmt], dest)}"
     raise ToolError(
