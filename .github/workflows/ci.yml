@@ -51,6 +51,12 @@ jobs:
           bash -n install.sh
           for f in tests/smoke.sh shims/*; do sh -n "$f"; done
 
+      - name: Install LibreOffice for CSV regression tests (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-calc
+
       - name: Unit tests
         run: python3 -m unittest discover -s tests/unit -v
 

@@ -310,7 +310,9 @@ def t_read_document(a: dict) -> str:
     raise ToolError(f"could not read {path.name}: {(err or 'no text extracted').strip()[:800]}")
 
 
-_CSV_ALL_SHEETS_FILTER = "csv:Text - txt - csv (StarCalc):44,34,UTF8,1,,0,false,true,false,false,false,-1"
+# CSV options: token 9 preserves displayed values; token 12 exports every sheet.
+# https://help.libreoffice.org/latest/en-US/text/shared/guide/csv_params.html
+_CSV_ALL_SHEETS_FILTER = "csv:Text - txt - csv (StarCalc):44,34,UTF8,1,,0,false,true,true,false,false,-1"
 _SPREADSHEET_EXT = {".xlsx", ".xls", ".ods"}
 
 
