@@ -195,13 +195,13 @@ def workdir(cwd: str | None) -> Path:
     return d
 
 
-_ORIG_SUBPROCESS_RUN = subprocess.run
 _LOCK = threading.Lock()
 _WRITE_LOCK = threading.Lock()
 _CURRENT_CTX = threading.local()
-_ACTIVE_PROCS: dict[object, subprocess.Popen] = {}
+_REQUEST_TOOLS: dict[object, str] = {}
 _CANCELLED_IDS: set[object] = set()
-_IN_FLIGHT_TOOLS = 0
+_PROGRESS_INTERVAL = 10.0
+_POLL_INTERVAL = 0.1
 
 
 def _send(payload: dict | list) -> None:
@@ -211,78 +211,78 @@ def _send(payload: dict | list) -> None:
 
 
 def _terminate_proc(proc: subprocess.Popen) -> None:
+    """Stop the process group, allowing the launcher time to clean up first."""
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         os.killpg(proc.pid, signal.SIGTERM)
     with contextlib.suppress(subprocess.TimeoutExpired):
-        proc.wait(timeout=0.5)
+        proc.wait(timeout=3.0)
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         os.killpg(proc.pid, signal.SIGKILL)
 
 
+def _stop_and_drain(proc: subprocess.Popen, partial: str | bytes | None = None) -> str:
+    """Bound pipe draining even if a detached descendant keeps a pipe open."""
+    _terminate_proc(proc)
+    out = partial.decode(errors="replace") if isinstance(partial, bytes) else (partial or "")
+    try:
+        drained, _ = proc.communicate(timeout=2.0)
+        return drained or out
+    except subprocess.TimeoutExpired as exc:
+        if exc.stdout:
+            out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
+        return out
+    finally:
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=2.0)
+
+
 def cancel_request(request_id: object) -> bool:
-    """Mark request_id as cancelled and terminate any active subprocess group for it."""
-    if request_id is None:
+    """Ignore unknown/completed IDs and installs, which must finish or roll back."""
+    if request_id is None or not _valid_id(request_id):
         return False
     with _LOCK:
+        name = _REQUEST_TOOLS.get(request_id)
+        if name is None or name == "install_package":
+            return False
         _CANCELLED_IDS.add(request_id)
-        proc = _ACTIVE_PROCS.get(request_id)
-    if proc is not None:
-        _terminate_proc(proc)
-        return True
-    return False
+    return True
 
 
-def emit_progress(
-    progress: float,
-    total: float | None = None,
-    message: str | None = None,
-    *,
-    token: object = None,
-) -> None:
-    tok = getattr(_CURRENT_CTX, "progress_token", None) if token is None else token
-    if tok is None or isinstance(tok, bool) or not isinstance(tok, (str, int, float)):
+def _is_cancelled() -> bool:
+    req_id = getattr(_CURRENT_CTX, "request_id", None)
+    with _LOCK:
+        return req_id in _CANCELLED_IDS
+
+
+def emit_progress(message: str) -> None:
+    tok = getattr(_CURRENT_CTX, "progress_token", None)
+    if tok is None or isinstance(tok, bool) or not isinstance(tok, (str, int)) or _is_cancelled():
         return
-    params: dict[str, object] = {"progressToken": tok, "progress": progress}
-    if total is not None:
-        params["total"] = total
-    if message is not None:
-        params["message"] = message
-    _send({"jsonrpc": "2.0", "method": "notifications/progress", "params": params})
+    value = getattr(_CURRENT_CTX, "progress_value", -1) + 1
+    _CURRENT_CTX.progress_value = value
+    _send(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": {"progressToken": tok, "progress": value, "message": message},
+        }
+    )
 
 
 def run(cmd: list[str], *, cwd: Path, timeout: int, env: dict[str, str] | None = None) -> tuple[int, str, str, float]:
-    """Run without a shell, stdin closed (agent-safe), output captured and capped."""
+    """Run a cancellable process group with periodic progress and bounded cleanup."""
     timeout = max(1, min(int(timeout or DEFAULT_TIMEOUT), MAX_TIMEOUT))
-    run_env = tool_env() if env is None else env
     start = time.monotonic()
-    if subprocess.run is not _ORIG_SUBPROCESS_RUN:
-        try:
-            r = subprocess.run(
-                cmd,
-                cwd=cwd,
-                env=run_env,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                errors="replace",
-                timeout=timeout,
-            )
-            return r.returncode, r.stdout, r.stderr, time.monotonic() - start
-        except subprocess.TimeoutExpired as e:
-            partial = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-            return (
-                124,
-                partial,
-                f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})",
-                time.monotonic() - start,
-            )
-        except FileNotFoundError:
-            return 127, "", f"command not found: {cmd[0]}", time.monotonic() - start
+    if _is_cancelled():
+        return 130, "", "cancelled", 0.0
     try:
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
-            env=run_env,
+            env=tool_env() if env is None else env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -293,37 +293,24 @@ def run(cmd: list[str], *, cwd: Path, timeout: int, env: dict[str, str] | None =
     except FileNotFoundError:
         return 127, "", f"command not found: {cmd[0]}", time.monotonic() - start
 
-    req_id = getattr(_CURRENT_CTX, "request_id", None)
-    if req_id is not None:
-        with _LOCK:
-            already_cancelled = req_id in _CANCELLED_IDS
-            if not already_cancelled:
-                _ACTIVE_PROCS[req_id] = proc
-        if already_cancelled:
-            _terminate_proc(proc)
-            out, _ = proc.communicate()
-            return 130, out or "", "cancelled", time.monotonic() - start
-
-    try:
-        out, err = proc.communicate(timeout=timeout)
-        code = proc.returncode
-    except subprocess.TimeoutExpired as e:
-        _terminate_proc(proc)
-        out, _ = proc.communicate()
-        if not out and e.stdout:
-            out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else e.stdout
-        code, out, err = 124, out or "", f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})"
-    finally:
-        if req_id is not None:
-            with _LOCK:
-                _ACTIVE_PROCS.pop(req_id, None)
-
-    if req_id is not None:
-        with _LOCK:
-            was_cancelled = req_id in _CANCELLED_IDS
-        if was_cancelled:
-            return 130, out or "", "cancelled", time.monotonic() - start
-    return code, out, err, time.monotonic() - start
+    next_progress = start + _PROGRESS_INTERVAL
+    while True:
+        if _is_cancelled():
+            return 130, _stop_and_drain(proc), "cancelled", time.monotonic() - start
+        remaining = timeout - (time.monotonic() - start)
+        if remaining <= 0:
+            out = _stop_and_drain(proc)
+            return 124, out, f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})", time.monotonic() - start
+        try:
+            out, err = proc.communicate(timeout=min(_POLL_INTERVAL, remaining))
+            return proc.returncode, out, err, time.monotonic() - start
+        except subprocess.TimeoutExpired as exc:
+            if time.monotonic() >= next_progress:
+                emit_progress(f"Waiting for {Path(cmd[0]).name}")
+                next_progress = time.monotonic() + _PROGRESS_INTERVAL
+            if time.monotonic() - start >= timeout:
+                out = _stop_and_drain(proc, exc.stdout)
+                return 124, out, f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})", time.monotonic() - start
 
 
 def cap(text: str, limit: int = MAX_OUTPUT) -> str:
@@ -779,15 +766,18 @@ def handle(msg: dict) -> dict | None:
         progress_token = meta.get("progressToken") if isinstance(meta, dict) else None
         _CURRENT_CTX.request_id = mid
         _CURRENT_CTX.progress_token = progress_token
+        _CURRENT_CTX.progress_value = -1
+        with _LOCK:
+            _REQUEST_TOOLS.setdefault(mid, tool_name)
         start = time.monotonic()
         try:
             with _LOCK:
                 pre_cancelled = mid is not None and mid in _CANCELLED_IDS
             if pre_cancelled:
                 raise ToolError("cancelled")
-            emit_progress(0, 1, f"Starting {tool['name']}")
+            emit_progress(f"Starting {tool['name']}")
             text, is_error = tool["fn"](args), False
-            emit_progress(1, 1, f"Completed {tool['name']}")
+            emit_progress(f"Completed {tool['name']}")
         except ToolError as e:
             text, is_error = str(e), True
         except Exception as e:  # never crash the server on a bad call
@@ -795,9 +785,12 @@ def handle(msg: dict) -> dict | None:
         finally:
             _CURRENT_CTX.request_id = None
             _CURRENT_CTX.progress_token = None
-            if mid is not None:
-                with _LOCK:
-                    _CANCELLED_IDS.discard(mid)
+        with _LOCK:
+            cancelled = mid in _CANCELLED_IDS
+            _CANCELLED_IDS.discard(mid)
+            _REQUEST_TOOLS.pop(mid, None)
+        if cancelled:
+            return None
         log(f"{tool['name']} {'failed' if is_error else 'ok'} in {time.monotonic() - start:.1f}s")
         return ok({"content": [{"type": "text", "text": text}], "isError": is_error})
     if method in ("resources/list", "prompts/list"):
@@ -829,24 +822,44 @@ class _RawReply:
 
 
 def _dispatch_message(msg) -> dict | list | None:
-    global _IN_FLIGHT_TOOLS
     if isinstance(msg, _RawReply):
         return msg.payload
     if isinstance(msg, list):
         if not msg:
             return _invalid_request()
-        replies = [r for r in (_safe_handle(m) for m in msg) if r is not None]
+        replies = [r for r in (_dispatch_message(m) for m in msg) if r is not None]
         return replies or None
-    is_tool_call = isinstance(msg, dict) and msg.get("method") == "tools/call"
-    if is_tool_call:
-        with _LOCK:
-            _IN_FLIGHT_TOOLS += 1
     try:
-        return _safe_handle(msg)
-    finally:
-        if is_tool_call:
+        reply = _safe_handle(msg)
+        if isinstance(msg, dict) and _valid_id(msg.get("id")):
             with _LOCK:
-                _IN_FLIGHT_TOOLS -= 1
+                if msg.get("id") in _CANCELLED_IDS:
+                    return None
+        return reply
+    finally:
+        if isinstance(msg, dict) and msg.get("method") == "tools/call" and _valid_id(msg.get("id")):
+            with _LOCK:
+                _REQUEST_TOOLS.pop(msg.get("id"), None)
+                _CANCELLED_IDS.discard(msg.get("id"))
+
+
+def _register_requests(msg) -> None:
+    """Register queued calls before the reader can receive their cancellation."""
+    if isinstance(msg, list):
+        for item in msg:
+            _register_requests(item)
+    elif (
+        isinstance(msg, dict)
+        and msg.get("jsonrpc") == "2.0"
+        and msg.get("method") == "tools/call"
+        and "id" in msg
+        and _valid_id(msg["id"])
+    ):
+        params = msg.get("params")
+        name = params.get("name") if isinstance(params, dict) else None
+        if isinstance(name, str):
+            with _LOCK:
+                _REQUEST_TOOLS.setdefault(msg["id"], name)
 
 
 def serve() -> int:
@@ -882,11 +895,8 @@ def serve() -> int:
         if isinstance(msg, dict) and "id" not in msg and msg.get("method") == "notifications/cancelled":
             _safe_handle(msg)
             continue
-        with _LOCK:
-            busy = _IN_FLIGHT_TOOLS > 0
         if (
-            busy
-            and isinstance(msg, dict)
+            isinstance(msg, dict)
             and msg.get("jsonrpc") == "2.0"
             and msg.get("method") == "ping"
             and "id" in msg
@@ -896,6 +906,7 @@ def serve() -> int:
             if reply:
                 _send(reply)
             continue
+        _register_requests(msg)
         work_q.put(msg)
 
     work_q.put(stop)

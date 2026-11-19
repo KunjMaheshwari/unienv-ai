@@ -10,7 +10,11 @@
 # Everything after the bootstrap flags is passed to `unienv install`.
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" && pwd)"
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+  REPO=""
+fi
 REF="${UNIENV_REF:-main}"
 UNIENV_HOME="${UNIENV_HOME:-$HOME/.unienv}"
 export UNIENV_HOME
@@ -29,7 +33,7 @@ say() { printf '\033[1;36m==>\033[0m \033[1m%s\033[0m\n' "$*"; }
 
 # 0. Run via `curl -fsSL .../install.sh | bash`? Then there is no checkout next to us:
 #    fetch the source tarball first.
-if [ ! -f "$REPO/src/unienv.py" ]; then
+if [ -z "$REPO" ] || [ ! -f "$REPO/src/unienv.py" ]; then
   say "Downloading UniEnv AI ($REF)"
   TMP_SRC="$(mktemp -d)"
   trap 'rm -rf "$TMP_SRC"' EXIT
@@ -40,14 +44,23 @@ if [ ! -f "$REPO/src/unienv.py" ]; then
 fi
 
 # 1. uv: manages the pinned Python for both the CLI and the shared environment
-UV="$(command -v uv || true)"
-for c in /opt/homebrew/bin/uv /usr/local/bin/uv "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
-  if [ -z "$UV" ] && [ -x "$c" ]; then UV="$c"; fi
-done
+resolve_uv() {
+  UV="$(command -v uv || true)"
+  for c in \
+    "${UV_INSTALL_DIR:+$UV_INSTALL_DIR/uv}" \
+    "${CARGO_HOME:-$HOME/.cargo}/bin/uv" \
+    "${XDG_BIN_HOME:+$XDG_BIN_HOME/uv}" \
+    "$HOME/.local/bin/uv" \
+    /opt/homebrew/bin/uv \
+    /usr/local/bin/uv; do
+    if [ -z "$UV" ] && [ -n "$c" ] && [ -x "$c" ]; then UV="$c"; fi
+  done
+}
+resolve_uv
 if [ -z "$UV" ]; then
   say "Installing uv (https://docs.astral.sh/uv/)"
   curl -LsSf https://astral.sh/uv/install.sh | sh
-  UV="$HOME/.local/bin/uv"
+  resolve_uv
 fi
 
 # 2. A uv-managed Python 3.12 runs the CLI: never Homebrew's or the OS Python,
