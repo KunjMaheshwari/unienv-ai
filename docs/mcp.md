@@ -67,11 +67,17 @@ New files go to **`~/UniEnv`** unless you or Claude give another path (override 
 
 ## Security model
 
-Each MCP tool declares safety annotations (`readOnlyHint`, `destructiveHint`, `openWorldHint`) so clients like Claude Desktop can prompt for approval before running code or installing packages. For stricter environments, three environment variables restrict the server:
+MCP safety annotations are hints to the client, not access controls. Approval prompts depend on the client. The server enforces these environment settings independently of prompts:
 
-- `UNIENV_MCP_MODE=readonly`: exposes only `unienv_capabilities`, `read_document`, and `convert_document`, disabling `run_python`, `run_tool`, and `install_package`.
-- `UNIENV_MCP_ALLOW_INSTALL=0`: hides and disables `install_package` while keeping the other tools available.
-- `UNIENV_MCP_ROOTS=~/Documents:~/Downloads:~/UniEnv`: colon-separated list of allowed directories (symlinks are resolved first); any read, convert, or working-directory path outside these roots is rejected.
+- `UNIENV_MCP_MODE=readonly` exposes only `unienv_capabilities`, `read_document`, and `convert_document`. Conversion still writes files: its destination must be exactly the source directory or `UNIENV_WORKDIR` (default `~/UniEnv`). Other output directories are rejected before they are created.
+- `UNIENV_MCP_ALLOW_INSTALL=0` hides and disables `install_package`. Boolean `false`, `no`, and `off` also disable it.
+- `UNIENV_MCP_ROOTS=~/Documents:~/Downloads:~/UniEnv` restricts document input, conversion output and working-directory parameters to these folders and their descendants after resolving symlinks. Include the workdir if you want outputs there. Empty means unrestricted; a nonempty list with no directories is rejected. Paths are separated by `:` on supported macOS/Linux systems.
+- Configuring roots also hides and disables `run_python`, `run_tool`, and `install_package`, even in full mode: arbitrary Python, command arguments and package installation cannot be confined by checking a working directory.
+- Conversion uses Pandoc's `--sandbox` so referenced local or remote resources cannot be read implicitly. Documents depending on external images or includes may lose those resources or fail to convert. Dangling symlinks count as occupied output names and are never reused.
+
+The Claude Desktop extension exposes **MCP mode**, **Allow package installation**, and **Allowed folders** alongside **Output folder** in its settings. Defaults preserve full access. For other clients, put the variables in the server's `env` configuration and restart the server.
+
+These controls restrict the server's exposed tools and explicit paths; they are not an OS sandbox. Document parsers and converters still run as your user, and concurrent filesystem changes can race path checks. Process untrusted documents using an OS sandbox or a separate account for stronger isolation. Without roots or readonly mode, `run_python` and `run_tool` have your account's filesystem and network access; disabling installation alone does not limit code execution.
 
 ## What it can't do
 

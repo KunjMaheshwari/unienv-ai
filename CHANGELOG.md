@@ -4,6 +4,9 @@ All notable changes to UniEnv AI are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Security
+- Add MCP readonly and folder restrictions, disable arbitrary execution under roots, protect dangling output symlinks, sandbox Pandoc conversions, and expose policy settings in the Desktop extension. (#33)
+
 ## [0.2.2] - 2026-11-18
 
 Nine community fixes and one security fix. Thank you @KunjMaheshwari, @bfs2021 and @sanjanamg0!

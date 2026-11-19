@@ -189,7 +189,9 @@ def allowed_roots() -> list[Path] | None:
     if not raw:
         return None
     roots = [Path(os.path.expanduser(part.strip())).resolve() for part in raw.split(os.pathsep) if part.strip()]
-    return roots or None
+    if not roots:
+        raise ToolError("UNIENV_MCP_ROOTS must contain at least one directory")
+    return roots
 
 
 def check_path_allowed(path: Path) -> Path:
@@ -204,14 +206,18 @@ def check_path_allowed(path: Path) -> Path:
 
 
 def active_tools() -> list[dict]:
-    """Return the tools enabled under UNIENV_MCP_MODE and UNIENV_MCP_ALLOW_INSTALL."""
+    """Return tools enabled by the server's configured policy."""
     mode = os.environ.get("UNIENV_MCP_MODE", "").strip().lower()
     if mode == "readonly":
         return [t for t in TOOLS if t["name"] in _READONLY_TOOLS]
+    disabled = set()
+    # A cwd check cannot constrain arbitrary Python or command arguments.
+    if os.environ.get("UNIENV_MCP_ROOTS", "").strip():
+        disabled.update({"run_python", "run_tool", "install_package"})
     allow_install = os.environ.get("UNIENV_MCP_ALLOW_INSTALL", "1").strip().lower()
     if allow_install in ("0", "false", "no", "off"):
-        return [t for t in TOOLS if t["name"] != "install_package"]
-    return TOOLS
+        disabled.add("install_package")
+    return [t for t in TOOLS if t["name"] not in disabled]
 
 
 def resolve(path: str, *, base: Path | None = None) -> Path:
@@ -270,11 +276,11 @@ def changed_files(d: Path, before: dict[str, float]) -> list[str]:
 
 def free_name(p: Path) -> Path:
     """Never overwrite: report.pdf -> report-1.pdf -> report-2.pdf ..."""
-    if not p.exists():
+    if not os.path.lexists(p):
         return p
     for i in range(1, 1000):
         q = p.with_name(f"{p.stem}-{i}{p.suffix}")
-        if not q.exists():
+        if not os.path.lexists(q):
             return q
     raise RuntimeError(f"no free file name for {p}")
 
@@ -350,7 +356,12 @@ def t_convert_document(a: dict) -> str:
     if not src.exists():
         raise ToolError(f"file not found: {src}")
     fmt = a["output_format"].lower().lstrip(".")
-    out_dir = workdir(a.get("output_dir")) if a.get("output_dir") else src.parent
+    if not re.fullmatch(r"[a-z0-9]+", fmt):
+        raise ToolError("output_format must be a file format such as pdf or docx")
+    out_dir = resolve(a["output_dir"]) if a.get("output_dir") else src.parent
+    if os.environ.get("UNIENV_MCP_MODE", "").strip().lower() == "readonly":
+        if out_dir.resolve() not in {src.resolve().parent, WORKDIR.resolve()}:
+            raise ToolError("readonly conversions must write next to the source or into UNIENV_WORKDIR")
     out_dir.mkdir(parents=True, exist_ok=True)
     dest = free_name(out_dir / f"{src.stem}.{fmt}")
     ext = src.suffix.lower()
@@ -369,7 +380,7 @@ def t_convert_document(a: dict) -> str:
 
     def via_pandoc(input_path: Path, to: str, target: Path) -> Path:
         code, out, err, _ = run(
-            ["pandoc", str(input_path), "-t", to, "-o", str(target)], cwd=input_path.parent, timeout=180
+            ["pandoc", "--sandbox", str(input_path), "-t", to, "-o", str(target)], cwd=input_path.parent, timeout=180
         )
         if code != 0:
             raise ToolError(f"pandoc failed: {err.strip()[:800]}")
