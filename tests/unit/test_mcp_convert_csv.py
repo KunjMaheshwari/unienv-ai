@@ -88,7 +88,7 @@ class ConvertCsvAllSheetsTests(unittest.TestCase):
                     'xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0">'
                     '<office:automatic-styles><number:percentage-style style:name="percentage">'
                     '<number:number number:decimal-places="1" number:min-integer-digits="1"/>'
-                    '<number:text>%</number:text></number:percentage-style>'
+                    "<number:text>%</number:text></number:percentage-style>"
                     '<style:style style:name="percent" style:family="table-cell" '
                     'style:data-style-name="percentage"/></office:automatic-styles>'
                     f"<office:body><office:spreadsheet>{sheets}</office:spreadsheet>"
