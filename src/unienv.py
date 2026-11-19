@@ -961,6 +961,154 @@ def cmd_need(args) -> int:
     return 0
 
 
+def _verify_python_imports(recipes: list[dict]) -> dict[str, str]:
+    """Verify battery Python imports. Returns a dict of {module: error_string} for failures."""
+    imports = uniq([m for r in recipes for m in r.get("python", {}).get("imports", [])])
+    if not imports:
+        return {}
+    py = PY_DIR / ".venv/bin/python"
+    if not py.exists():
+        return {"python": "shared Python env missing"}
+    code = (
+        "import importlib, json\nbad = {}\n"
+        f"for m in {imports!r}:\n"
+        "    try: importlib.import_module(m)\n"
+        "    except Exception as e: bad[m] = f'{type(e).__name__}: {e}'[:120]\n"
+        "print(json.dumps(bad))"
+    )
+    r = run([str(py), "-P", "-c", code], capture=True, check=False, timeout=120)
+    if r.returncode != 0:
+        return {"python": (r.stderr or r.stdout or "import check failed").strip()[:200]}
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return {"python": "could not parse import check output"}
+
+
+def cmd_upgrade(args) -> int:
+    recipes_all = load_recipes()
+    state = load_state(recipes_all)
+    recipes = active_recipes(recipes_all, state)
+    w = wanted(recipes, state)
+    pkgs = args.packages or []
+    do_py = not args.node
+    do_node = bool(args.node) or (not pkgs and bool(w["node"]))
+
+    if args.dry_run:
+        if do_py and (PY_DIR / "pyproject.toml").exists():
+            uv = find_uv()
+            uv_cmd = [uv, "lock", "--project", str(PY_DIR), "--managed-python", "--dry-run"]
+            if pkgs:
+                for p in pkgs:
+                    uv_cmd.extend(["--upgrade-package", py_name(p)])
+            else:
+                uv_cmd.append("--upgrade")
+            r = run(uv_cmd, capture=True, check=False, env={"UV_PROJECT_ENVIRONMENT": str(PY_DIR / ".venv")})
+            out = ((r.stdout or "") + (r.stderr or "")).strip()
+            info(out or "Python packages: all up to date")
+        if do_node and (NODE_DIR / "package.json").exists():
+            npm = which("npm")
+            if npm:
+                r = run([npm, "outdated", *pkgs], cwd=NODE_DIR, capture=True, check=False)
+                out = (r.stdout or "").strip()
+                info(out or "Node packages: all up to date")
+        return 0
+
+    before_py = python_packages() if do_py else {}
+    before_node = node_packages(w["node"]) if do_node else {}
+
+    tracked = [
+        STATE_FILE,
+        PY_DIR / "pyproject.toml",
+        PY_DIR / "uv.lock",
+        NODE_DIR / "package.json",
+        NODE_DIR / "package-lock.json",
+    ]
+    existed = {f: f.exists() for f in tracked}
+    snap = BACKUP_DIR / _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    snap.mkdir(parents=True, exist_ok=True)
+    for f in tracked:
+        if existed[f]:
+            shutil.copy2(f, snap / f"{f.parent.name}__{f.name}")
+
+    try:
+        if do_py:
+            uv = find_uv()
+            write_pyproject(w["python"])
+            uv_cmd = [uv, "lock", "--project", str(PY_DIR), "--managed-python"]
+            if pkgs:
+                for p in pkgs:
+                    uv_cmd.extend(["--upgrade-package", py_name(p)])
+            else:
+                uv_cmd.append("--upgrade")
+            run(uv_cmd, env={"UV_PROJECT_ENVIRONMENT": str(PY_DIR / ".venv")})
+            install_python(w["python"])
+            bad_imports = _verify_python_imports(recipes)
+            if bad_imports:
+                details = "; ".join(f"{m}: {err}" for m, err in bad_imports.items())
+                raise RuntimeError(f"import check failed after upgrade ({details})")
+        if do_node and w["node"]:
+            npm = which("npm")
+            if not npm:
+                if args.node:
+                    raise RuntimeError("npm not found")
+                warn("npm not found; skipping Node upgrade")
+            else:
+                if not (NODE_DIR / "package.json").exists():
+                    write_package_json(w["node"])
+                run(
+                    [
+                        npm,
+                        "update",
+                        "--save",
+                        "--no-audit",
+                        "--no-fund",
+                        "--loglevel=error",
+                        "--progress=false",
+                        "--no-update-notifier",
+                        *pkgs,
+                    ],
+                    cwd=NODE_DIR,
+                )
+    except (subprocess.CalledProcessError, RuntimeError, SystemExit) as e:
+        warn(f"upgrade failed ({e}); rolling back")
+        for f in tracked:
+            if existed[f]:
+                shutil.copy2(snap / f"{f.parent.name}__{f.name}", f)
+            elif f.exists():
+                f.unlink()
+        state = load_state(recipes_all)
+        try:
+            if do_py and existed[PY_DIR / "pyproject.toml"]:
+                install_python(wanted(recipes, state)["python"])
+            if do_node and existed[NODE_DIR / "package.json"]:
+                install_node(wanted(recipes, state)["node"])
+        except (subprocess.CalledProcessError, RuntimeError, SystemExit) as re_err:
+            warn(f"rollback re-install failed ({re_err}); run unienv install to repair")
+        log_event(event="upgrade-failed", packages=pkgs, node=bool(args.node))
+        return 1
+
+    after_py = python_packages() if do_py else {}
+    after_node = node_packages(w["node"]) if do_node else {}
+    changes = []
+    for k in sorted(set(before_py) | set(after_py)):
+        b, a = before_py.get(k), after_py.get(k)
+        if b != a and a is not None:
+            changes.append(f"{k} {b or '(new)'} -> {a}")
+    for k in sorted(set(before_node) | set(after_node)):
+        b, a = before_node.get(k), after_node.get(k)
+        if b != a and a is not None:
+            changes.append(f"node:{k} {b or '(new)'} -> {a}")
+
+    do_sync(state, recipes_all, quiet=True)
+    log_event(event="upgrade", packages=pkgs, changes=changes)
+    if changes:
+        info("✓ upgraded: " + ", ".join(changes))
+    else:
+        info("✓ all packages already at latest compatible versions")
+    return 0
+
+
 def cmd_list(args) -> int:
     recipes_all = load_recipes()
     state = load_state(recipes_all)
@@ -1579,6 +1727,12 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.add_argument("-y", "--yes", action="store_true")
     s.set_defaults(fn=cmd_need)
 
+    s = sub.add_parser("upgrade", help="upgrade installed Python and Node packages with automatic rollback")
+    s.add_argument("packages", nargs="*", help="specific packages to upgrade (default: all)")
+    s.add_argument("--node", action="store_true", help="upgrade Node packages")
+    s.add_argument("--dry-run", action="store_true", help="show what would be upgraded without changing anything")
+    s.set_defaults(fn=cmd_upgrade)
+
     s = sub.add_parser("doctor", help="verify tools, shell wiring, agent files and secrets hygiene")
     s.add_argument("--json", action="store_true", help="machine-readable output for agents and CI")
     s.add_argument("--fix", action="store_true", help="apply safe fixes (regenerate wiring), then re-check")
@@ -1623,7 +1777,11 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.set_defaults(fn=lambda a: print(BIN) or 0)
 
     args = p.parse_args(argv)
-    mutating = args.cmd in ("install", "need", "sync", "uninstall") or (args.cmd == "doctor" and args.fix)
+    mutating = (
+        args.cmd in ("install", "need", "sync", "uninstall")
+        or (args.cmd == "upgrade" and not args.dry_run)
+        or (args.cmd == "doctor" and args.fix)
+    )
     try:
         with state_lock() if mutating else contextlib.nullcontext():
             return args.fn(args)
