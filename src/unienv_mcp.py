@@ -300,7 +300,12 @@ def run(cmd: list[str], *, cwd: Path, timeout: int, env: dict[str, str] | None =
         remaining = timeout - (time.monotonic() - start)
         if remaining <= 0:
             out = _stop_and_drain(proc)
-            return 124, out, f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})", time.monotonic() - start
+            return (
+                124,
+                out,
+                f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})",
+                time.monotonic() - start,
+            )
         try:
             out, err = proc.communicate(timeout=min(_POLL_INTERVAL, remaining))
             return proc.returncode, out, err, time.monotonic() - start
@@ -310,7 +315,12 @@ def run(cmd: list[str], *, cwd: Path, timeout: int, env: dict[str, str] | None =
                 next_progress = time.monotonic() + _PROGRESS_INTERVAL
             if time.monotonic() - start >= timeout:
                 out = _stop_and_drain(proc, exc.stdout)
-                return 124, out, f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})", time.monotonic() - start
+                return (
+                    124,
+                    out,
+                    f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})",
+                    time.monotonic() - start,
+                )
 
 
 def cap(text: str, limit: int = MAX_OUTPUT) -> str:
@@ -895,8 +905,11 @@ def serve() -> int:
         if isinstance(msg, dict) and "id" not in msg and msg.get("method") == "notifications/cancelled":
             _safe_handle(msg)
             continue
+        with _LOCK:
+            busy = bool(_REQUEST_TOOLS)
         if (
-            isinstance(msg, dict)
+            busy
+            and isinstance(msg, dict)
             and msg.get("jsonrpc") == "2.0"
             and msg.get("method") == "ping"
             and "id" in msg
