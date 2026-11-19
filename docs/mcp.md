@@ -65,6 +65,14 @@ New files go to **`~/UniEnv`** unless you or Claude give another path (override 
 - `unienv doctor` performs a real MCP handshake against every configured app.
 - Tested end-to-end in CI (`tests/mcp_test.py`) and with a real MCP client: Claude Code headless with only this server and no shell tools, which created a Word file and its PDF in 24 s.
 
+## Security model
+
+Each MCP tool declares safety annotations (`readOnlyHint`, `destructiveHint`, `openWorldHint`) so clients like Claude Desktop can prompt for approval before running code or installing packages. For stricter environments, three environment variables restrict the server:
+
+- `UNIENV_MCP_MODE=readonly`: exposes only `unienv_capabilities`, `read_document`, and `convert_document`, disabling `run_python`, `run_tool`, and `install_package`.
+- `UNIENV_MCP_ALLOW_INSTALL=0`: hides and disables `install_package` while keeping the other tools available.
+- `UNIENV_MCP_ROOTS=~/Documents:~/Downloads:~/UniEnv`: colon-separated list of allowed directories (symlinks are resolved first); any read, convert, or working-directory path outside these roots is rejected.
+
 ## What it can't do
 
 - **Claude.ai on the web / ChatGPT on the web** can't reach your computer at all; MCP servers only run where the app runs.

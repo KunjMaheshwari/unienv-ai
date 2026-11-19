@@ -180,13 +180,48 @@ def which(name: str) -> str | None:
     return shutil.which(name, path=tool_env()["PATH"])
 
 
+_READONLY_TOOLS = {"unienv_capabilities", "read_document", "convert_document"}
+
+
+def allowed_roots() -> list[Path] | None:
+    """Return resolved allowed root directories when UNIENV_MCP_ROOTS is set, else None."""
+    raw = os.environ.get("UNIENV_MCP_ROOTS", "").strip()
+    if not raw:
+        return None
+    roots = [Path(os.path.expanduser(part.strip())).resolve() for part in raw.split(os.pathsep) if part.strip()]
+    return roots or None
+
+
+def check_path_allowed(path: Path) -> Path:
+    """Resolve symlinks and verify path is inside UNIENV_MCP_ROOTS when configured."""
+    roots = allowed_roots()
+    if roots is None:
+        return path
+    resolved = path.resolve()
+    if not any(resolved == r or resolved.is_relative_to(r) for r in roots):
+        raise ToolError(f"path {path} is outside allowed UNIENV_MCP_ROOTS")
+    return resolved
+
+
+def active_tools() -> list[dict]:
+    """Return the tools enabled under UNIENV_MCP_MODE and UNIENV_MCP_ALLOW_INSTALL."""
+    mode = os.environ.get("UNIENV_MCP_MODE", "").strip().lower()
+    if mode == "readonly":
+        return [t for t in TOOLS if t["name"] in _READONLY_TOOLS]
+    allow_install = os.environ.get("UNIENV_MCP_ALLOW_INSTALL", "1").strip().lower()
+    if allow_install in ("0", "false", "no", "off"):
+        return [t for t in TOOLS if t["name"] != "install_package"]
+    return TOOLS
+
+
 def resolve(path: str, *, base: Path | None = None) -> Path:
     p = Path(os.path.expanduser(path))
-    return p if p.is_absolute() else (base or WORKDIR) / p
+    target = p if p.is_absolute() else (base or WORKDIR) / p
+    return check_path_allowed(target)
 
 
 def workdir(cwd: str | None) -> Path:
-    d = resolve(cwd) if cwd else WORKDIR
+    d = resolve(cwd) if cwd else check_path_allowed(WORKDIR)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -642,13 +677,21 @@ def handle(msg: dict) -> dict | None:
     if method == "ping":
         return ok({})
     if method == "tools/list":
-        return ok({"tools": [{k: v for k, v in t.items() if k != "fn"} for t in TOOLS]})
+        return ok({"tools": [{k: v for k, v in t.items() if k != "fn"} for t in active_tools()]})
     if method == "tools/call":
         tool_name = params.get("name")
         if not isinstance(tool_name, str):
             return error(-32602, "tool name must be a string")
-        tool = TOOL_INDEX.get(tool_name)
+        enabled = {t["name"]: t for t in active_tools()}
+        tool = enabled.get(tool_name)
         if tool is None:
+            if tool_name in TOOL_INDEX:
+                return ok(
+                    {
+                        "content": [{"type": "text", "text": f"tool '{tool_name}' is disabled by MCP safe mode"}],
+                        "isError": True,
+                    }
+                )
             return error(-32602, f"unknown tool: {tool_name}")
         raw_args = params.get("arguments")
         if raw_args is None:
