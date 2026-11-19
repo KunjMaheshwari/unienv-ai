@@ -5,6 +5,9 @@ All notable changes to UniEnv AI are documented here. The format follows [Keep a
 ## [Unreleased]
 
 ### Added
+- MCP cancellation for queued and running tools, responsive pings, and progress heartbeats during subprocess waits; package installs remain non-cancellable to preserve rollback. Process cleanup bounds pipe draining and terminates process groups. (#32)
+
+### Added
 - `unienv upgrade [packages] [--node] [--dry-run]` upgrades installed Python and Node packages, checks that every battery module still imports, and rolls back automatically if anything fails. By @KunjMaheshwari in #112. (#27)
 - Windsurf adapter: `unienv sync` writes the UniEnv block into Windsurf's global rules (`~/.codeium/windsurf/memories/global_rules.md`). By @KunjMaheshwari in #101. (#5)
 - CI: unit tests for the MCP helpers, a check that a release tag matches the version in all three files, and a weekly job that runs the LibreOffice conversions. By @KunjMaheshwari in #106. (#74)
