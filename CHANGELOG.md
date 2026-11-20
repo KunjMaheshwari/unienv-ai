@@ -4,6 +4,23 @@ All notable changes to UniEnv AI are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Fixed
+- Recover the CLI from a missing Python interpreter using a recorded absolute uv path even under minimal GUI PATHs; report a repair command when recovery is unavailable. (#24)
+
+### Added
+- MCP server: clients can cancel running and queued tool calls, pings are answered during long calls, and long calls send a progress heartbeat every 10 s. Package installs can't be cancelled, so their rollback always runs. By @KunjMaheshwari in #131. (#32)
+- `unienv upgrade [packages] [--node] [--dry-run]` upgrades installed Python and Node packages, checks that every battery module still imports, and rolls back automatically if anything fails. By @KunjMaheshwari in #112. (#27)
+- Windsurf adapter: `unienv sync` writes the UniEnv block into Windsurf's global rules (`~/.codeium/windsurf/memories/global_rules.md`). By @KunjMaheshwari in #101. (#5)
+- CI: unit tests for the MCP helpers, a check that a release tag matches the version in all three files, and a weekly job that runs the LibreOffice conversions. By @KunjMaheshwari in #106. (#74)
+
+### Fixed
+- Wiring a file keeps its own line endings (CRLF, LF or CR) instead of converting the whole file. By @bfs2021 in #90. (#57)
+- `unienv update --ref` accepts tags and commit SHAs as well as branches, and a failed download ends with a clear message instead of a traceback. By @KunjMaheshwari in #94. (#63)
+- `unienv need --node` fails and rolls back when npm is missing, instead of reporting success. By @KunjMaheshwari in #95. (#59)
+- `curl … | bash` always downloads UniEnv, even when run from inside a checkout, and finds uv in its install folders right after installing it. By @KunjMaheshwari in #100. (#71)
+- When a tool call times out, the MCP server stops the whole process group, so no LibreOffice or other child processes are left running. By @KunjMaheshwari in #131. (#16)
+- Converting a multi-sheet spreadsheet to CSV exports every sheet, with values as displayed (`12.5%`, not `0.125`), and every output file gets a free name, so existing files are never overwritten. By @KunjMaheshwari in #133. (#69)
+
 ## [0.2.2] - 2026-11-18
 
 Nine community fixes and one security fix. Thank you @KunjMaheshwari, @bfs2021 and @sanjanamg0!

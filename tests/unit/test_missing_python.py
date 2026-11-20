@@ -28,6 +28,7 @@ class MissingPythonFallbackTests(unittest.TestCase):
                 patch.object(u, "UNIENV_HOME", root),
                 patch.object(u, "BIN", bin_dir),
                 patch.object(u.sys, "executable", str(gone_py)),
+                patch.object(u, "which", return_value=None),
             ):
                 u.write_shims()
 
@@ -41,11 +42,11 @@ class MissingPythonFallbackTests(unittest.TestCase):
             self.assertIn("UniEnv's Python 3.12 interpreter is missing. Repair with:", r.stderr)
             self.assertIn("install.sh | bash", r.stderr)
 
-    def test_unienv_shim_falls_back_to_uv_python_find(self):
+    def test_unienv_shim_finds_absolute_uv_with_gui_minimal_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bin_dir = root / "bin"
-            fake_uv_dir = root / "uvbin"
+            fake_uv_dir = root / "uv bin"
             fake_uv_dir.mkdir()
             fake_uv = fake_uv_dir / "uv"
             fake_uv.write_text(f'#!/bin/sh\necho "{sys.executable}"\n')
@@ -56,12 +57,13 @@ class MissingPythonFallbackTests(unittest.TestCase):
                 patch.object(u, "UNIENV_HOME", root),
                 patch.object(u, "BIN", bin_dir),
                 patch.object(u.sys, "executable", str(gone_py)),
+                patch.object(u, "which", side_effect=lambda name: str(fake_uv) if name == "uv" else None),
             ):
                 u.write_shims()
 
             r = subprocess.run(
                 [str(bin_dir / "unienv"), "--version"],
-                env={"PATH": f"{fake_uv_dir}:/usr/bin:/bin"},
+                env={"PATH": "/usr/bin:/bin"},
                 capture_output=True,
                 text=True,
             )
