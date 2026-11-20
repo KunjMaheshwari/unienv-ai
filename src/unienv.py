@@ -303,7 +303,11 @@ def state_lock():
         else:
             import fcntl
 
-            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("waiting for another unienv command to finish…", file=sys.stderr, flush=True)
+                fcntl.flock(f, fcntl.LOCK_EX)
             yield
 
 

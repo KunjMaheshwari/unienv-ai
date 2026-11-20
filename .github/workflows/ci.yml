@@ -47,6 +47,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
+      - name: Install core smoke-test dependency
+        run: choco install ripgrep --yes --no-progress
       - name: Windows regression tests
         run: python -m unittest discover -s tests/unit -p test_windows_support.py -v
       - name: Install, exercise both shells, and uninstall
