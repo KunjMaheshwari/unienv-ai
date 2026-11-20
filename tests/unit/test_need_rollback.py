@@ -35,7 +35,7 @@ class NeedRollbackTests(unittest.TestCase):
             (root / "state.json").write_text(json.dumps(u.default_state({})) + "\n")
             initial_state_bytes = (root / "state.json").read_bytes()
 
-            def fake_install_node(packages):
+            def fake_install_node(packages, **kwargs):
                 u.write_package_json(packages)
                 (u.NODE_DIR / "package-lock.json").write_text("{}\n")
                 (u.NODE_DIR / "node_modules" / "bad-pkg").mkdir(parents=True)
@@ -69,7 +69,7 @@ class NeedRollbackTests(unittest.TestCase):
 
             calls = []
 
-            def fake_install_node(packages):
+            def fake_install_node(packages, **kwargs):
                 calls.append(list(packages))
                 if "bad-pkg" in packages:
                     (u.NODE_DIR / "package.json").write_text('{"corrupted": true}\n')
@@ -117,6 +117,9 @@ class NeedRollbackTests(unittest.TestCase):
             def fail_after_writing(packages):
                 u.write_pyproject(packages)
                 (u.PY_DIR / "uv.lock").write_text("version = 1\n")
+                (u.PY_DIR / ".python-version").write_text("3.12\n")
+                (u.PY_DIR / ".venv").mkdir()
+                (u.PY_DIR / ".venv" / "created").write_text("temporary")
                 raise subprocess.CalledProcessError(1, ["uv", "sync"])
 
             stack.enter_context(patch.object(u, "load_recipes", return_value={}))
@@ -130,6 +133,31 @@ class NeedRollbackTests(unittest.TestCase):
             self.assertIn("rolling back", err.getvalue())
             self.assertFalse((u.PY_DIR / "pyproject.toml").exists())
             self.assertFalse((u.PY_DIR / "uv.lock").exists())
+            self.assertFalse((u.PY_DIR / ".python-version").exists())
+            self.assertFalse((u.PY_DIR / ".venv").exists())
+
+    def test_failed_first_project_preserves_preexisting_venv_and_python_version(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+            self._setup_home(stack, tmp)
+            venv = u.PY_DIR / ".venv"
+            venv.mkdir(parents=True)
+            marker = venv / "keep"
+            marker.write_bytes(b"existing interpreter")
+            version = u.PY_DIR / ".python-version"
+            version.write_bytes(b"3.12.1\n")
+
+            def fail(packages):
+                u.write_pyproject(packages)
+                version.write_text("3.12.9")
+                raise RuntimeError("failed")
+
+            stack.enter_context(patch.object(u, "load_recipes", return_value={}))
+            stack.enter_context(patch.object(u, "install_python", side_effect=fail))
+            args = argparse.Namespace(packages=["bad-pkg"], node=False, bin=False, cask=False, yes=False)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(u.cmd_need(args), 1)
+            self.assertEqual(marker.read_bytes(), b"existing interpreter")
+            self.assertEqual(version.read_bytes(), b"3.12.1\n")
 
 
 if __name__ == "__main__":
