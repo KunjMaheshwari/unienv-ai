@@ -51,6 +51,22 @@ class ChangedFilesSubfolderTests(unittest.TestCase):
             changed = mcp.changed_files(work, before)
             self.assertEqual(changed, [str(work / "out" / "report.docx")])
 
+    def test_snapshot_caps_directories_even_when_they_contain_no_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = pathlib.Path(tmp)
+            for i in range(20):
+                (work / f"dir{i:02}").mkdir()
+            opened = []
+            original = pathlib.Path.iterdir
+
+            def tracked(path):
+                opened.append(path)
+                return original(path)
+
+            with patch.object(mcp, "_SNAPSHOT_MAX_DIRS", 5), patch.object(pathlib.Path, "iterdir", tracked):
+                self.assertEqual(mcp.snapshot(work), {})
+            self.assertEqual(len(opened), 5)
+
     def test_t_run_python_reports_file_created_in_subfolder(self):
         with tempfile.TemporaryDirectory() as tmp:
             work = pathlib.Path(tmp)
