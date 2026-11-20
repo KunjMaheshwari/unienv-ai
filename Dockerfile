@@ -28,8 +28,6 @@ RUN apt-get update \
        else \
          ./install.sh --yes --all-agents; \
        fi \
-    && cp /root/.unienv/AGENTS.md /root/AGENTS.md \
-    && cp /root/.unienv/AGENTS.md /root/CLAUDE.md \
     && rm -rf /var/lib/apt/lists/* /opt/unienv-src
 
 WORKDIR /workspace

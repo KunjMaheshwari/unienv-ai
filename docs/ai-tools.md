@@ -35,12 +35,12 @@ Run `unienv sync --all-agents` to write instruction files even for tools that ar
 
 For cloud coding agents (Codex cloud, GitHub Copilot coding agent, containerized sandboxes) and VS Code Dev Containers:
 
-- **Docker image (`Dockerfile`)**: Builds on `debian:bookworm-slim`, installs default UniEnv batteries, wires `/root/.unienv/bin` into `PATH` and `BASH_ENV`, and populates `AGENTS.md` and `CLAUDE.md` in the home directory:
+- **Docker image (`Dockerfile`)**: Published on each release tag as a multi-arch (`linux/amd64`, `linux/arm64`) image at `ghcr.io/rupeshbharambe24/unienv:<tag>` (built on `debian:bookworm-slim` with default batteries and `--all-agents` wiring `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`, and `~/.config/opencode/AGENTS.md`):
   ```bash
   docker build -t unienv-ai .
   docker run --rm -it unienv-ai unienv status
   ```
-- **Dev Container Feature (`.devcontainer/unienv`)**: Add UniEnv to `.devcontainer/devcontainer.json` with optional `batteries` selection:
+- **Dev Container Feature (`.devcontainer/unienv`)**: Published on each release tag to GHCR (`ghcr.io/rupeshbharambe24/unienv/unienv:0`) and pinned to the matching UniEnv release tag:
   ```json
   {
     "features": {
