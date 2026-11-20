@@ -1,10 +1,11 @@
-"""Unit tests for #37 (`unienv sandbox print` and `unienv sandbox install`)."""
+"""Sandbox settings merge and ownership tests."""
 
 import argparse
 import contextlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import tempfile
 import tomllib
@@ -18,79 +19,105 @@ spec.loader.exec_module(u)
 
 
 class SandboxProfileTests(unittest.TestCase):
-    def test_sandbox_print_claude(self):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            rc = u.cmd_sandbox(argparse.Namespace(action="print", tool="claude"))
-        self.assertEqual(rc, 0)
-        data = json.loads(out.getvalue())
-        self.assertIn("permissions", data)
-        self.assertIn("allow", data["permissions"])
-        self.assertTrue(any("ue-py" in r for r in data["permissions"]["allow"]))
-        self.assertIn(str(u.UNIENV_HOME), data["sandbox"]["readableRoots"])
-        self.assertIn("/private/tmp", data["sandbox"]["writableRoots"])
+    def test_profiles_only_grant_the_unienv_directory(self):
+        claude = json.loads(u.sandbox_profile("claude"))
+        self.assertFalse(any(rule.startswith("Bash(") for rule in claude["permissions"]["allow"]))
+        self.assertEqual(claude["sandbox"]["filesystem"]["allowWrite"], [str(u.UNIENV_HOME)])
+        codex = tomllib.loads(u.sandbox_profile("codex"))
+        self.assertNotIn("sandbox_mode", codex)
+        self.assertNotIn("readable_roots", codex["sandbox_workspace_write"])
+        self.assertEqual(codex["sandbox_workspace_write"]["writable_roots"], [str(u.UNIENV_HOME)])
 
-    def test_sandbox_print_codex_is_valid_toml(self):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            rc = u.cmd_sandbox(argparse.Namespace(action="print", tool="codex"))
-        self.assertEqual(rc, 0)
-        parsed = tomllib.loads(out.getvalue())
-        self.assertEqual(parsed["sandbox_mode"], "workspace-write")
-        self.assertIn("/private/tmp", parsed["sandbox_workspace_write"]["writable_roots"])
-        self.assertIn(str(u.UNIENV_HOME), parsed["sandbox_workspace_write"]["readable_roots"])
+    def test_codex_merge_preserves_tables_mode_and_existing_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            config = root / "config.toml"
+            original = {
+                "sandbox_mode": "read-only",
+                "model": "test-model",
+                "sandbox_workspace_write": {"network_access": False, "writable_roots": ["/existing"]},
+                "profiles": {"work": {"model": "other", "approval_policy": "on-request"}},
+            }
+            config.write_text(u._toml_text(original))
+            with patch.object(u, "UNIENV_HOME", root / "unienv"):
+                self.assertTrue(u._install_codex_sandbox(config))
+                self.assertFalse(u._install_codex_sandbox(config))
+                current = tomllib.loads(config.read_text())
+                self.assertEqual(current["sandbox_mode"], "read-only")
+                self.assertEqual(current["profiles"], original["profiles"])
+                self.assertEqual(
+                    current["sandbox_workspace_write"]["writable_roots"], ["/existing", str(u.UNIENV_HOME)]
+                )
+                current["model"] = "user-changed-after-install"
+                config.write_text(u._toml_text(current))
+                u._uninstall_sandbox()
+            restored = tomllib.loads(config.read_text())
+            self.assertEqual(restored["sandbox_workspace_write"], original["sandbox_workspace_write"])
+            self.assertEqual(restored["model"], "user-changed-after-install")
+            self.assertEqual(restored["profiles"], original["profiles"])
+            self.assertTrue(list(root.glob("config.toml.unienv-backup-*")))
 
-    def test_sandbox_print_seatbelt_and_gemini(self):
-        for tool in ("gemini", "seatbelt"):
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                rc = u.cmd_sandbox(argparse.Namespace(action="print", tool=tool))
-            self.assertEqual(rc, 0)
-            text = out.getvalue()
-            self.assertIn("(allow file-read* file-map-executable", text)
-            self.assertIn(f'(subpath "{u.UNIENV_HOME}")', text)
-            self.assertIn('(subpath "/private/tmp")', text)
+    def test_claude_preserves_existing_rules_and_removes_only_owned_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            cfg = root / "settings.json"
+            cfg.write_text(json.dumps({"permissions": {"allow": ["Bash(git status)"]}, "theme": "dark"}))
+            with patch.object(u, "UNIENV_HOME", root / "unienv"):
+                self.assertTrue(u._install_claude_sandbox(cfg))
+                self.assertFalse(u._install_claude_sandbox(cfg))
+                current = json.loads(cfg.read_text())
+                current["permissions"]["allow"].append("Read(/user-added)")
+                cfg.write_text(json.dumps(current))
+                u._uninstall_sandbox()
+            restored = json.loads(cfg.read_text())
+            self.assertEqual(
+                restored, {"permissions": {"allow": ["Bash(git status)", "Read(/user-added)"]}, "theme": "dark"}
+            )
 
-    def test_sandbox_install_claude_merges_and_creates_backup(self):
+    def test_preexisting_unienv_root_is_not_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            cfg = root / "config.toml"
+            with patch.object(u, "UNIENV_HOME", root / "unienv"):
+                cfg.write_text(u.sandbox_profile("codex"))
+                self.assertFalse(u._install_codex_sandbox(cfg))
+                u._uninstall_sandbox()
+                self.assertEqual(
+                    tomllib.loads(cfg.read_text())["sandbox_workspace_write"]["writable_roots"], [str(u.UNIENV_HOME)]
+                )
+
+    def test_uninstall_command_removes_new_config_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = pathlib.Path(tmp)
-            claude_dir = home / ".claude"
-            claude_dir.mkdir(parents=True)
-            settings = claude_dir / "settings.json"
-            settings.write_text(json.dumps({"permissions": {"allow": ["Bash(git *)"]}, "theme": "dark"}))
             with (
                 patch.object(u, "HOME", home),
+                patch.object(u, "UNIENV_HOME", home / "unienv"),
+                patch.object(u, "SHELL_FILES", []),
+                patch.object(u, "agent_targets", return_value=[]),
+                patch.object(u, "mcp_clients", return_value={}),
+                patch.object(u, "LAUNCH_AGENT", home / "absent.plist"),
+                patch.dict(os.environ, {"CODEX_HOME": str(home / "codex")}),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
-                rc = u.cmd_sandbox(argparse.Namespace(action="install", tool="claude"))
-                self.assertEqual(rc, 0)
-                # Second run is a no-op
-                rc2 = u.cmd_sandbox(argparse.Namespace(action="install", tool="claude"))
-                self.assertEqual(rc2, 0)
-            merged = json.loads(settings.read_text())
-            self.assertEqual(merged["theme"], "dark")
-            self.assertIn("Bash(git *)", merged["permissions"]["allow"])
-            self.assertTrue(any("ue-py" in r for r in merged["permissions"]["allow"]))
-            self.assertTrue(list(claude_dir.glob("settings.json.unienv-backup-*")))
+                self.assertEqual(u.cmd_sandbox(argparse.Namespace(action="install", tool="all")), 0)
+                self.assertEqual(u.cmd_uninstall(argparse.Namespace(purge=False)), 0)
+                self.assertFalse((home / "codex/config.toml").exists())
+                self.assertFalse((home / ".claude/settings.json").exists())
 
-    def test_sandbox_install_codex_merges_block_and_creates_backup(self):
+    def test_invalid_config_is_not_overwritten(self):
         with tempfile.TemporaryDirectory() as tmp:
-            home = pathlib.Path(tmp)
-            codex_dir = home / ".codex"
-            codex_dir.mkdir(parents=True)
-            cfg = codex_dir / "config.toml"
-            cfg.write_text('model = "gpt-5"\n')
-            with (
-                patch.object(u, "HOME", home),
-                patch.dict(u.os.environ, {"CODEX_HOME": str(codex_dir)}, clear=False),
-                contextlib.redirect_stdout(io.StringIO()),
-            ):
-                rc = u.cmd_sandbox(argparse.Namespace(action="install", tool="codex"))
-            self.assertEqual(rc, 0)
-            text = cfg.read_text()
-            self.assertIn('model = "gpt-5"', text)
-            self.assertIn("sandbox_workspace_write", text)
-            self.assertTrue(list(codex_dir.glob("config.toml.unienv-backup-*")))
+            root = pathlib.Path(tmp)
+            cfg = root / "config.toml"
+            cfg.write_text("[broken")
+            with patch.object(u, "UNIENV_HOME", root / "unienv"), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    u._install_codex_sandbox(cfg)
+            self.assertEqual(cfg.read_text(), "[broken")
+
+    def test_seatbelt_profile_includes_write_access_to_unienv(self):
+        text = u.sandbox_profile("seatbelt")
+        self.assertIn("file-write*", text)
+        self.assertIn(json.dumps(str(u.UNIENV_HOME)), text)
 
 
 if __name__ == "__main__":

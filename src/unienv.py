@@ -503,11 +503,13 @@ def write_package_json(packages: list[str]) -> None:
     pj.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def install_node(packages: list[str]) -> None:
+def install_node(packages: list[str], *, require_npm: bool = False) -> None:
     if not packages:
         return
     npm = which("npm")
     if not npm:
+        if require_npm:
+            raise RuntimeError("npm not found: install Node.js (`unienv need --bin node`)")
         warn("npm not found; skipping Node batteries (install Node.js, then `unienv install`).")
         return
     write_package_json(packages)
@@ -704,6 +706,15 @@ def agent_targets() -> list[dict]:
             "detect": [HOME / ".config/opencode"],
             "bin": "opencode",
             "instructions": HOME / ".config/opencode/AGENTS.md",
+            "skills": None,
+        },
+        {
+            # https://docs.windsurf.com/windsurf/cascade/memories#rules
+            "id": "windsurf",
+            "name": "Windsurf",
+            "detect": [HOME / ".codeium/windsurf"],
+            "bin": "windsurf",
+            "instructions": HOME / ".codeium/windsurf/memories/global_rules.md",
             "skills": None,
         },
     ]
@@ -917,7 +928,7 @@ def cmd_need(args) -> int:
         if kind == "python":
             install_python(w["python"])
         elif kind == "node":
-            install_node(w["node"])
+            install_node(w["node"], require_npm=True)
         else:
             failed = install_system(
                 {
@@ -947,6 +958,154 @@ def cmd_need(args) -> int:
     log_event(event="need", kind=kind, packages=new, curated=not uncurated)
     via = {"python": "ue-py", "node": "ue-node"}.get(kind, "PATH")
     info(f"✓ installed {', '.join(new)}; available to every AI tool via {via}")
+    return 0
+
+
+def _verify_python_imports(recipes: list[dict]) -> dict[str, str]:
+    """Verify battery Python imports. Returns a dict of {module: error_string} for failures."""
+    imports = uniq([m for r in recipes for m in r.get("python", {}).get("imports", [])])
+    if not imports:
+        return {}
+    py = PY_DIR / ".venv/bin/python"
+    if not py.exists():
+        return {"python": "shared Python env missing"}
+    code = (
+        "import importlib, json\nbad = {}\n"
+        f"for m in {imports!r}:\n"
+        "    try: importlib.import_module(m)\n"
+        "    except Exception as e: bad[m] = f'{type(e).__name__}: {e}'[:120]\n"
+        "print(json.dumps(bad))"
+    )
+    r = run([str(py), "-P", "-c", code], capture=True, check=False, timeout=120)
+    if r.returncode != 0:
+        return {"python": (r.stderr or r.stdout or "import check failed").strip()[:200]}
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return {"python": "could not parse import check output"}
+
+
+def cmd_upgrade(args) -> int:
+    recipes_all = load_recipes()
+    state = load_state(recipes_all)
+    recipes = active_recipes(recipes_all, state)
+    w = wanted(recipes, state)
+    pkgs = args.packages or []
+    do_py = not args.node
+    do_node = bool(args.node) or (not pkgs and bool(w["node"]))
+
+    if args.dry_run:
+        if do_py and (PY_DIR / "pyproject.toml").exists():
+            uv = find_uv()
+            uv_cmd = [uv, "lock", "--project", str(PY_DIR), "--managed-python", "--dry-run"]
+            if pkgs:
+                for p in pkgs:
+                    uv_cmd.extend(["--upgrade-package", py_name(p)])
+            else:
+                uv_cmd.append("--upgrade")
+            r = run(uv_cmd, capture=True, check=False, env={"UV_PROJECT_ENVIRONMENT": str(PY_DIR / ".venv")})
+            out = ((r.stdout or "") + (r.stderr or "")).strip()
+            info(out or "Python packages: all up to date")
+        if do_node and (NODE_DIR / "package.json").exists():
+            npm = which("npm")
+            if npm:
+                r = run([npm, "outdated", *pkgs], cwd=NODE_DIR, capture=True, check=False)
+                out = (r.stdout or "").strip()
+                info(out or "Node packages: all up to date")
+        return 0
+
+    before_py = python_packages() if do_py else {}
+    before_node = node_packages(w["node"]) if do_node else {}
+
+    tracked = [
+        STATE_FILE,
+        PY_DIR / "pyproject.toml",
+        PY_DIR / "uv.lock",
+        NODE_DIR / "package.json",
+        NODE_DIR / "package-lock.json",
+    ]
+    existed = {f: f.exists() for f in tracked}
+    snap = BACKUP_DIR / _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    snap.mkdir(parents=True, exist_ok=True)
+    for f in tracked:
+        if existed[f]:
+            shutil.copy2(f, snap / f"{f.parent.name}__{f.name}")
+
+    try:
+        if do_py:
+            uv = find_uv()
+            write_pyproject(w["python"])
+            uv_cmd = [uv, "lock", "--project", str(PY_DIR), "--managed-python"]
+            if pkgs:
+                for p in pkgs:
+                    uv_cmd.extend(["--upgrade-package", py_name(p)])
+            else:
+                uv_cmd.append("--upgrade")
+            run(uv_cmd, env={"UV_PROJECT_ENVIRONMENT": str(PY_DIR / ".venv")})
+            install_python(w["python"])
+            bad_imports = _verify_python_imports(recipes)
+            if bad_imports:
+                details = "; ".join(f"{m}: {err}" for m, err in bad_imports.items())
+                raise RuntimeError(f"import check failed after upgrade ({details})")
+        if do_node and w["node"]:
+            npm = which("npm")
+            if not npm:
+                if args.node:
+                    raise RuntimeError("npm not found")
+                warn("npm not found; skipping Node upgrade")
+            else:
+                if not (NODE_DIR / "package.json").exists():
+                    write_package_json(w["node"])
+                run(
+                    [
+                        npm,
+                        "update",
+                        "--save",
+                        "--no-audit",
+                        "--no-fund",
+                        "--loglevel=error",
+                        "--progress=false",
+                        "--no-update-notifier",
+                        *pkgs,
+                    ],
+                    cwd=NODE_DIR,
+                )
+    except (subprocess.CalledProcessError, RuntimeError, SystemExit) as e:
+        warn(f"upgrade failed ({e}); rolling back")
+        for f in tracked:
+            if existed[f]:
+                shutil.copy2(snap / f"{f.parent.name}__{f.name}", f)
+            elif f.exists():
+                f.unlink()
+        state = load_state(recipes_all)
+        try:
+            if do_py and existed[PY_DIR / "pyproject.toml"]:
+                install_python(wanted(recipes, state)["python"])
+            if do_node and existed[NODE_DIR / "package.json"]:
+                install_node(wanted(recipes, state)["node"])
+        except (subprocess.CalledProcessError, RuntimeError, SystemExit) as re_err:
+            warn(f"rollback re-install failed ({re_err}); run unienv install to repair")
+        log_event(event="upgrade-failed", packages=pkgs, node=bool(args.node))
+        return 1
+
+    after_py = python_packages() if do_py else {}
+    after_node = node_packages(w["node"]) if do_node else {}
+    changes = []
+    for k in sorted(set(before_py) | set(after_py)):
+        b, a = before_py.get(k), after_py.get(k)
+        if b != a and a is not None:
+            changes.append(f"{k} {b or '(new)'} -> {a}")
+    for k in sorted(set(before_node) | set(after_node)):
+        b, a = before_node.get(k), after_node.get(k)
+        if b != a and a is not None:
+            changes.append(f"node:{k} {b or '(new)'} -> {a}")
+
+    do_sync(state, recipes_all, quiet=True)
+    log_event(event="upgrade", packages=pkgs, changes=changes)
+    if changes:
+        info("✓ upgraded: " + ", ".join(changes))
+    else:
+        info("✓ all packages already at latest compatible versions")
     return 0
 
 
@@ -1006,7 +1165,7 @@ def cmd_status(args) -> int:
     return 0
 
 
-REPO_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/archive/refs/heads/{ref}.tar.gz"
+REPO_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/archive/{ref}.tar.gz"
 
 
 # ── MCP server for desktop apps ─────────────────────────────────────────────
@@ -1131,6 +1290,7 @@ def cmd_update(args) -> int:
     """Download the latest UniEnv, replace ~/.unienv/share, then re-run install with the new code."""
     import tarfile
     import tempfile
+    import urllib.error
     import urllib.request
 
     share = UNIENV_HOME / "share"
@@ -1140,7 +1300,11 @@ def cmd_update(args) -> int:
     step(f"Downloading {url}")
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "unienv.tar.gz"
-        urllib.request.urlretrieve(url, archive)
+        try:
+            with urllib.request.urlopen(url) as resp, archive.open("wb") as out:
+                shutil.copyfileobj(resp, out)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+            die(f"could not download UniEnv ref {args.ref!r} ({e}); check the branch or tag name")
         with tarfile.open(archive) as tar:
             tar.extractall(tmp, filter="data")
         src = next(Path(tmp).glob("unienv-ai-*"))
@@ -1487,6 +1651,7 @@ def cmd_wire(args) -> int:
 
 
 def cmd_uninstall(args) -> int:
+    _uninstall_sandbox()
     for rc in SHELL_FILES:
         try:
             if remove_block(rc, SHELL_BEGIN, SHELL_END):
@@ -1527,123 +1692,187 @@ def cmd_uninstall(args) -> int:
 
 
 def _sandbox_read_roots() -> list[str]:
-    roots = [str(UNIENV_HOME), "/private/tmp", "/tmp"]
-    bp = brew_prefix()
-    if bp:
-        roots.append(bp)
-    else:
-        roots.extend(["/opt/homebrew", "/usr/local"])
-    return uniq(roots)
+    return [str(UNIENV_HOME)]
+
+
+def _toml_text(data: dict) -> str:
+    """Serialize parsed TOML values without changing their types or table scope."""
+
+    def value(item):
+        if isinstance(item, str):
+            return json.dumps(item)
+        if isinstance(item, bool):
+            return str(item).lower()
+        if isinstance(item, (int, float)):
+            return repr(item)
+        if isinstance(item, list):
+            return "[" + ", ".join(value(v) for v in item) + "]"
+        if isinstance(item, dict):
+            return "{ " + ", ".join(json.dumps(k) + " = " + value(v) for k, v in item.items()) + " }"
+        if isinstance(item, (_dt.datetime, _dt.date, _dt.time)):
+            return item.isoformat()
+        raise ValueError(f"unsupported TOML value: {type(item).__name__}")
+
+    return "\n".join(json.dumps(k) + " = " + value(v) for k, v in data.items()) + "\n"
 
 
 def sandbox_profile(tool: str) -> str:
-    read_roots = _sandbox_read_roots()
+    root = str(UNIENV_HOME)
     if tool == "claude":
-        cfg = {
-            "permissions": {
-                "allow": [
-                    f"Bash({BIN / 'ue-py'} *)",
-                    f"Bash({BIN / 'ue-node'} *)",
-                    f"Bash({BIN / 'soffice-safe'} *)",
-                    f"Bash({BIN / 'unienv'} list*)",
-                    f"Bash({BIN / 'unienv'} doctor*)",
-                    f"Read({UNIENV_HOME}/**)",
-                ]
+        return json.dumps(
+            {
+                "permissions": {"allow": [f"Read(/{UNIENV_HOME.as_posix()}/**)"]},
+                "sandbox": {"filesystem": {"allowRead": [root], "allowWrite": [root]}},
             },
-            "sandbox": {
-                "readableRoots": read_roots,
-                "writableRoots": ["/private/tmp", "/tmp"],
-            },
-        }
-        return json.dumps(cfg, indent=2)
-    if tool == "codex":
-        roots_toml = ", ".join(json.dumps(r) for r in ["/private/tmp", "/tmp"])
-        read_toml = ", ".join(json.dumps(r) for r in read_roots)
-        return (
-            "# Codex CLI sandbox profile for UniEnv (read/exec access to ~/.unienv and temp dirs)\n"
-            'sandbox_mode = "workspace-write"\n\n'
-            "[sandbox_workspace_write]\n"
-            f"writable_roots = [{roots_toml}]\n"
-            f"readable_roots = [{read_toml}]\n"
+            indent=2,
         )
+    if tool == "codex":
+        return _toml_text({"sandbox_workspace_write": {"writable_roots": [root]}})
     if tool in ("gemini", "seatbelt"):
-        lines = [
-            ";; macOS Seatbelt profile snippet for UniEnv AI (Gemini CLI / sandbox-exec)",
-            "(allow file-read* file-map-executable",
-            *[f'  (subpath "{r}")' for r in read_roots],
-            ")",
-            "(allow file-write*",
-            '  (subpath "/private/tmp")',
-            '  (subpath "/tmp")',
-            ")",
-        ]
-        return "\n".join(lines)
+        escaped = json.dumps(root)
+        return (
+            ";; Merge into an existing Seatbelt profile; this is not a complete policy.\n"
+            f"(allow file-read* file-map-executable (subpath {escaped}))\n"
+            f"(allow file-write* (subpath {escaped}))"
+        )
     die(f"unknown sandbox tool: {tool}")
 
 
-def _install_claude_sandbox(path: Path) -> bool:
-    data = _load_json(path)
-    profile = json.loads(sandbox_profile("claude"))
-    perms = data.setdefault("permissions", {})
-    allow = perms.setdefault("allow", [])
+def _sandbox_load(path: Path, tool: str) -> dict:
+    try:
+        raw = path.read_text(encoding="utf-8") if path.exists() else ""
+        data = tomllib.loads(raw) if tool == "codex" else (json.loads(raw) if raw.strip() else {})
+        if not isinstance(data, dict):
+            raise ValueError("expected a configuration object")
+        return data
+    except (ValueError, OSError) as exc:
+        die(f"cannot read sandbox settings {path}: {exc}")
+
+
+def _sandbox_state() -> tuple[Path, dict]:
+    path = UNIENV_HOME / "sandbox-settings.json"
+    return path, _sandbox_load(path, "claude")
+
+
+def _sandbox_write(path: Path, data: dict, tool: str) -> None:
+    text = _toml_text(data) if tool == "codex" else json.dumps(data, indent=2) + "\n"
+    if tool == "codex":
+        tomllib.loads(text)
+    if path.exists():
+        backup = path.with_name(path.name + f".unienv-backup-{_dt.datetime.now():%Y%m%d-%H%M%S-%f}")
+        shutil.copy2(path, backup)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(path, text)
+
+
+def _sandbox_fields(tool: str) -> dict[tuple[str, ...], list[str]]:
+    root = str(UNIENV_HOME)
+    if tool == "codex":
+        return {("sandbox_workspace_write", "writable_roots"): [root]}
+    return {
+        ("permissions", "allow"): [f"Read(/{UNIENV_HOME.as_posix()}/**)"],
+        ("sandbox", "filesystem", "allowRead"): [root],
+        ("sandbox", "filesystem", "allowWrite"): [root],
+    }
+
+
+def _install_sandbox(path: Path, tool: str) -> bool:
+    data = _sandbox_load(path, tool)
+    state_path, state = _sandbox_state()
+    key = str(path.resolve())
+    record = state.get(key, {"tool": tool, "added": {}, "created": [], "new_file": not path.exists()})
     changed = False
-    for rule in profile["permissions"]["allow"]:
-        if rule not in allow:
-            allow.append(rule)
-            changed = True
-    sb = data.setdefault("sandbox", {})
-    for key in ("readableRoots", "writableRoots"):
-        existing = sb.setdefault(key, [])
-        for r in profile["sandbox"][key]:
-            if r not in existing:
-                existing.append(r)
+    for fields, additions in _sandbox_fields(tool).items():
+        parent = data
+        for index, field in enumerate(fields[:-1]):
+            if field not in parent:
+                parent[field] = {}
+                record["created"].append(list(fields[: index + 1]))
+            if not isinstance(parent[field], dict):
+                die(f"{path}: {'.'.join(fields[: index + 1])} must be a table/object")
+            parent = parent[field]
+        name = fields[-1]
+        if name not in parent:
+            parent[name] = []
+            record["created"].append(list(fields))
+        values = parent[name]
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            die(f"{path}: {'.'.join(fields)} must be a list of strings")
+        for item in additions:
+            if item not in values:
+                values.append(item)
+                record["added"].setdefault(".".join(fields), []).append(item)
                 changed = True
     if not changed:
         return False
-    if path.exists():
-        backup = path.with_name(path.name + f".unienv-backup-{_dt.datetime.now():%Y%m%d-%H%M%S}")
-        shutil.copy2(path, backup)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    _sandbox_write(path, data, tool)
+    state[key] = record
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(state_path, json.dumps(state, indent=2) + "\n")
     return True
 
 
+def _uninstall_sandbox() -> None:
+    state_path, state = _sandbox_state()
+    for key, record in list(state.items()):
+        path = Path(key)
+        try:
+            data = _sandbox_load(path, record["tool"])
+            for dotted, items in record["added"].items():
+                fields = dotted.split(".")
+                parent = data
+                for field in fields[:-1]:
+                    parent = parent.get(field, {}) if isinstance(parent, dict) else {}
+                values = parent.get(fields[-1]) if isinstance(parent, dict) else None
+                if isinstance(values, list):
+                    parent[fields[-1]] = [v for v in values if v not in items]
+            for fields in sorted(record["created"], key=len, reverse=True):
+                parent = data
+                for field in fields[:-1]:
+                    parent = parent.get(field, {}) if isinstance(parent, dict) else {}
+                if isinstance(parent, dict) and parent.get(fields[-1]) in ({}, []):
+                    parent.pop(fields[-1], None)
+            if path.exists():
+                if record["new_file"] and not data:
+                    path.unlink()
+                else:
+                    _sandbox_write(path, data, record["tool"])
+            del state[key]
+        except (OSError, SystemExit) as exc:
+            warn(f"could not remove sandbox settings from {path}: {exc}")
+    if state:
+        atomic_write(state_path, json.dumps(state, indent=2) + "\n")
+    elif state_path.exists():
+        state_path.unlink()
+
+
+def _install_claude_sandbox(path: Path) -> bool:
+    return _install_sandbox(path, "claude")
+
+
 def _install_codex_sandbox(path: Path) -> bool:
-    body = sandbox_profile("codex").strip()
-    if path.exists():
-        backup = path.with_name(path.name + f".unienv-backup-{_dt.datetime.now():%Y%m%d-%H%M%S}")
-        shutil.copy2(path, backup)
-    return upsert_block(path, body, SHELL_BEGIN, SHELL_END)
+    return _install_sandbox(path, "codex")
 
 
 def cmd_sandbox(args) -> int:
     if args.action == "print":
-        tools = ("claude", "codex", "gemini", "seatbelt") if args.tool == "all" else (args.tool,)
-        blocks = []
-        for t in tools:
-            if len(tools) > 1:
-                blocks.append(f"# --- {t} ---\n{sandbox_profile(t)}")
-            else:
-                blocks.append(sandbox_profile(t))
-        print("\n\n".join(blocks))
+        tools = ("claude", "codex", "seatbelt") if args.tool == "all" else (args.tool,)
+        for tool in tools:
+            print(sandbox_profile(tool))
         return 0
     if args.tool not in ("claude", "codex", "all"):
-        die("`unienv sandbox install` supports --tool claude, codex, or all")
-    targets = ("claude", "codex") if args.tool == "all" else (args.tool,)
-    codex_home = Path(os.environ.get("CODEX_HOME", HOME / ".codex"))
-    for t in targets:
-        if t == "claude":
-            cfg_path = HOME / ".claude/settings.json"
-            if _install_claude_sandbox(cfg_path):
-                info(f"  ✓ merged UniEnv sandbox rules into {cfg_path}")
-            else:
-                info(f"  ✓ claude: sandbox rules already present ({cfg_path})")
-        elif t == "codex":
-            cfg_path = codex_home / "config.toml"
-            if _install_codex_sandbox(cfg_path):
-                info(f"  ✓ merged UniEnv sandbox rules into {cfg_path}")
-            else:
-                info(f"  ✓ codex: sandbox rules already present ({cfg_path})")
+        die("sandbox install supports claude, codex, or all")
+    tools = ("claude", "codex") if args.tool == "all" else (args.tool,)
+    for tool in tools:
+        path = (
+            HOME / ".claude/settings.json"
+            if tool == "claude"
+            else Path(os.environ.get("CODEX_HOME", HOME / ".codex")) / "config.toml"
+        )
+        changed = _install_sandbox(path, tool)
+        info(f"  {tool}: {'updated' if changed else 'already configured'} ({path})")
+        if tool == "codex":
+            info("  Codex writable_roots applies in workspace-write mode; the current sandbox mode was not changed.")
     return 0
 
 
@@ -1686,6 +1915,12 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     g.add_argument("--cask", action="store_true", help="macOS app (Homebrew cask)")
     s.add_argument("-y", "--yes", action="store_true")
     s.set_defaults(fn=cmd_need)
+
+    s = sub.add_parser("upgrade", help="upgrade installed Python and Node packages with automatic rollback")
+    s.add_argument("packages", nargs="*", help="specific packages to upgrade (default: all)")
+    s.add_argument("--node", action="store_true", help="upgrade Node packages")
+    s.add_argument("--dry-run", action="store_true", help="show what would be upgraded without changing anything")
+    s.set_defaults(fn=cmd_upgrade)
 
     s = sub.add_parser("doctor", help="verify tools, shell wiring, agent files and secrets hygiene")
     s.add_argument("--json", action="store_true", help="machine-readable output for agents and CI")
@@ -1741,7 +1976,12 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.set_defaults(fn=cmd_sandbox)
 
     args = p.parse_args(argv)
-    mutating = args.cmd in ("install", "need", "sync", "uninstall") or (args.cmd == "doctor" and args.fix)
+    mutating = (
+        args.cmd in ("install", "need", "sync", "uninstall")
+        or (args.cmd == "upgrade" and not args.dry_run)
+        or (args.cmd == "doctor" and args.fix)
+        or (args.cmd == "sandbox" and args.action == "install")
+    )
     try:
         with state_lock() if mutating else contextlib.nullcontext():
             return args.fn(args)

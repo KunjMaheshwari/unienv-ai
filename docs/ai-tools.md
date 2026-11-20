@@ -11,8 +11,9 @@ UniEnv reaches AI tools in two ways:
 | **Codex CLI** | `$CODEX_HOME/AGENTS.md` (default `~/.codex/AGENTS.md`) | `~/.codex/skills/unienv/SKILL.md` | `~/.codex/` or `codex` |
 | **Gemini CLI** | `~/.gemini/GEMINI.md` | none | `~/.gemini/` or `gemini` |
 | **OpenCode** | `~/.config/opencode/AGENTS.md` | none | `~/.config/opencode/` or `opencode` |
+| **Windsurf** | `~/.codeium/windsurf/memories/global_rules.md` ([docs](https://docs.windsurf.com/windsurf/cascade/memories#rules)) | none | `~/.codeium/windsurf/` or `windsurf` |
 | **Cursor** | paste `~/.unienv/AGENTS.md` into *Settings → Rules → User Rules*; MCP tools via `unienv mcp install --client cursor` | none | manual for now ([#4](https://github.com/rupeshbharambe24/unienv-ai/issues/4)) |
-| **Windsurf, Cline, Roo, Copilot, Aider** | paste `~/.unienv/AGENTS.md` into the tool's global rules | none | adapters planned, help wanted |
+| **Cline, Roo, Copilot, Aider** | paste `~/.unienv/AGENTS.md` into the tool's global rules | none | adapters planned, help wanted |
 | **Claude Desktop chat** | **UniEnv MCP server**: `unienv mcp install` or the `.mcpb` extension ([guide](mcp.md)) | n/a | config file |
 | **LM Studio, other MCP apps** | MCP server via `unienv mcp config` | n/a | manual |
 
@@ -26,25 +27,29 @@ Run `unienv sync --all-agents` to write instruction files even for tools that ar
 
 **Gemini CLI** loads `~/.gemini/GEMINI.md` as global context.
 
+**Windsurf** loads global rules from `~/.codeium/windsurf/memories/global_rules.md` ([Windsurf Rules docs](https://docs.windsurf.com/windsurf/cascade/memories#rules)).
+
 **Desktop apps** don't start a shell and get the system's minimal PATH. That's why MCP servers configured as `npx …` or `uvx …` fail with `spawn ENOENT`. Use absolute paths, for example `"command": "/Users/you/.unienv/bin/ue-py"`.
 
 ## Sandbox profiles (`unienv sandbox`)
 
-When an AI agent runs inside a restricted sandbox (Claude Code's `/sandbox`, Codex CLI's `workspace-write`, or Gemini CLI's macOS Seatbelt profile), read/execute access to `~/.unienv`, Homebrew prefixes, and temporary directories (`/private/tmp`, `/tmp`) must be permitted so `ue-py`, `ue-node`, and `soffice-safe` work without falling back to throwaway virtualenvs.
+Use these settings when an agent's sandbox needs to write UniEnv's cache, package state, or environment. The profiles grant access only to the configured UniEnv directory; they do not auto-approve arbitrary Python or shell commands.
 
-- **Print sandbox allow-rules**:
-  ```bash
-  unienv sandbox print --tool claude
-  unienv sandbox print --tool codex
-  unienv sandbox print --tool seatbelt
-  ```
-- **Merge non-destructive read/exec rules into tool configs** (creates a timestamped backup first):
-  ```bash
-  unienv sandbox install --tool claude
-  unienv sandbox install --tool codex
-  ```
-- **Which operations need write access to `~/.unienv`?**
-  Normal agent commands (`ue-py`, `ue-node`, `soffice-safe`, `unienv list`, `unienv doctor`) only need **read/execute** access to `~/.unienv` and **write** access to `/private/tmp` (for throwaway LibreOffice profiles). Only mutating commands — `unienv need`, `unienv install`, `unienv sync`, and `unienv update` — require write access to `~/.unienv`.
+```sh
+unienv sandbox print --tool claude
+unienv sandbox print --tool codex
+unienv sandbox print --tool seatbelt
+unienv sandbox install --tool claude
+unienv sandbox install --tool codex
+```
+
+- Claude Code uses `sandbox.filesystem.allowRead` and `allowWrite` for the UniEnv directory plus a narrowly scoped Read permission. It does not change sandbox enablement or add Bash permissions. See the [sandbox settings documentation](https://code.claude.com/docs/en/sandboxing).
+- Codex uses `sandbox_workspace_write.writable_roots`. The existing sandbox mode and network setting are preserved. The additional root is effective in `workspace-write` mode; choose that mode yourself if appropriate. The installer never silently changes a read-only policy. See the [configuration reference](https://developers.openai.com/codex/config-reference).
+- Configuration is parsed before any write. Existing values and nested tables are retained, and timestamped backups are created. TOML is reserialized, so comments and formatting remain available in the backup rather than in the rewritten file.
+- UniEnv records which entries it added in `~/.unienv/sandbox-settings.json`. `unienv uninstall` removes only those entries, retaining pre-existing grants and subsequent unrelated settings. Invalid or unreadable configurations are reported instead of overwritten.
+- Seatbelt/Gemini output is a snippet to merge into an existing policy, not a complete sandbox policy. It grants file access to UniEnv only; keep the agent's normal temporary-directory and executable rules.
+
+Package installation, upgrades, sync, and update need write access to UniEnv. Sandbox permissions do not provide network permission automatically, and organization-managed policy can override local settings.
 
 ## Adding a tool
 
