@@ -184,13 +184,54 @@ def which(name: str) -> str | None:
     return shutil.which(name, path=tool_env()["PATH"])
 
 
+_READONLY_TOOLS = {"unienv_capabilities", "read_document", "convert_document"}
+
+
+def allowed_roots() -> list[Path] | None:
+    """Return resolved allowed root directories when UNIENV_MCP_ROOTS is set, else None."""
+    raw = os.environ.get("UNIENV_MCP_ROOTS", "").strip()
+    if not raw:
+        return None
+    roots = [Path(os.path.expanduser(part.strip())).resolve() for part in raw.split(os.pathsep) if part.strip()]
+    if not roots:
+        raise ToolError("UNIENV_MCP_ROOTS must contain at least one directory")
+    return roots
+
+
+def check_path_allowed(path: Path) -> Path:
+    """Resolve symlinks and verify path is inside UNIENV_MCP_ROOTS when configured."""
+    roots = allowed_roots()
+    if roots is None:
+        return path
+    resolved = path.resolve()
+    if not any(resolved == r or resolved.is_relative_to(r) for r in roots):
+        raise ToolError(f"path {path} is outside allowed UNIENV_MCP_ROOTS")
+    return resolved
+
+
+def active_tools() -> list[dict]:
+    """Return tools enabled by the server's configured policy."""
+    mode = os.environ.get("UNIENV_MCP_MODE", "").strip().lower()
+    if mode == "readonly":
+        return [t for t in TOOLS if t["name"] in _READONLY_TOOLS]
+    disabled = set()
+    # A cwd check cannot constrain arbitrary Python or command arguments.
+    if os.environ.get("UNIENV_MCP_ROOTS", "").strip():
+        disabled.update({"run_python", "run_tool", "install_package"})
+    allow_install = os.environ.get("UNIENV_MCP_ALLOW_INSTALL", "1").strip().lower()
+    if allow_install in ("0", "false", "no", "off"):
+        disabled.add("install_package")
+    return [t for t in TOOLS if t["name"] not in disabled]
+
+
 def resolve(path: str, *, base: Path | None = None) -> Path:
     p = Path(os.path.expanduser(path))
-    return p if p.is_absolute() else (base or WORKDIR) / p
+    target = p if p.is_absolute() else (base or WORKDIR) / p
+    return check_path_allowed(target)
 
 
 def workdir(cwd: str | None) -> Path:
-    d = resolve(cwd) if cwd else WORKDIR
+    d = resolve(cwd) if cwd else check_path_allowed(WORKDIR)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -343,11 +384,11 @@ def changed_files(d: Path, before: dict[str, float]) -> list[str]:
 
 def free_name(p: Path) -> Path:
     """Never overwrite: report.pdf -> report-1.pdf -> report-2.pdf ..."""
-    if not p.exists():
+    if not os.path.lexists(p):
         return p
     for i in range(1, 1000):
         q = p.with_name(f"{p.stem}-{i}{p.suffix}")
-        if not q.exists():
+        if not os.path.lexists(q):
             return q
     raise RuntimeError(f"no free file name for {p}")
 
@@ -429,7 +470,12 @@ def t_convert_document(a: dict) -> str:
     if not src.exists():
         raise ToolError(f"file not found: {src}")
     fmt = a["output_format"].lower().lstrip(".")
-    out_dir = workdir(a.get("output_dir")) if a.get("output_dir") else src.parent
+    if not re.fullmatch(r"[a-z0-9]+", fmt):
+        raise ToolError("output_format must be a file format such as pdf or docx")
+    out_dir = resolve(a["output_dir"]) if a.get("output_dir") else src.parent
+    if os.environ.get("UNIENV_MCP_MODE", "").strip().lower() == "readonly":
+        if out_dir.resolve() not in {src.resolve().parent, WORKDIR.resolve()}:
+            raise ToolError("readonly conversions must write next to the source or into UNIENV_WORKDIR")
     out_dir.mkdir(parents=True, exist_ok=True)
     dest = free_name(out_dir / f"{src.stem}.{fmt}")
     ext = src.suffix.lower()
@@ -459,9 +505,11 @@ def t_convert_document(a: dict) -> str:
         return f"Converted to {len(paths)} files:\n" + "\n".join(str(p) for p in paths)
 
     def via_pandoc(input_path: Path, to: str, target: Path) -> Path:
-        code, out, err, _ = run(
-            ["pandoc", str(input_path), "-t", to, "-o", str(target)], cwd=input_path.parent, timeout=180
+        safe_mode = bool(os.environ.get("UNIENV_MCP_ROOTS", "").strip()) or (
+            os.environ.get("UNIENV_MCP_MODE", "").strip().lower() == "readonly"
         )
+        cmd = ["pandoc", *(["--sandbox"] if safe_mode else []), str(input_path), "-t", to, "-o", str(target)]
+        code, out, err, _ = run(cmd, cwd=input_path.parent, timeout=180)
         if code != 0:
             raise ToolError(f"pandoc failed: {err.strip()[:800]}")
         return target
@@ -773,13 +821,21 @@ def handle(msg: dict) -> dict | None:
     if method == "ping":
         return ok({})
     if method == "tools/list":
-        return ok({"tools": [{k: v for k, v in t.items() if k != "fn"} for t in TOOLS]})
+        return ok({"tools": [{k: v for k, v in t.items() if k != "fn"} for t in active_tools()]})
     if method == "tools/call":
         tool_name = params.get("name")
         if not isinstance(tool_name, str):
             return error(-32602, "tool name must be a string")
-        tool = TOOL_INDEX.get(tool_name)
+        enabled = {t["name"]: t for t in active_tools()}
+        tool = enabled.get(tool_name)
         if tool is None:
+            if tool_name in TOOL_INDEX:
+                return ok(
+                    {
+                        "content": [{"type": "text", "text": f"tool '{tool_name}' is disabled by MCP safe mode"}],
+                        "isError": True,
+                    }
+                )
             return error(-32602, f"unknown tool: {tool_name}")
         raw_args = params.get("arguments")
         if raw_args is None:
