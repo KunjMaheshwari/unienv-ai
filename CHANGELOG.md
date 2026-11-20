@@ -4,6 +4,12 @@ All notable changes to UniEnv AI are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Security
+- Add MCP readonly and folder restrictions, disable arbitrary execution under roots, protect dangling output symlinks, sandbox Pandoc conversions, and expose policy settings in the Desktop extension. (#33)
+
+### Added
+- MCP image content for document reads, PDF renders and generated charts, with signature validation, a consistent 512 KB image limit, and a shared changed-file scan. (#31)
+
 ### Added
 - Add Cline and Roo Code rule adapters without probing Documents for absent Cline; remove empty generated rules on uninstall. (#6)
 

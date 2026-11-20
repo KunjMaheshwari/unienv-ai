@@ -46,11 +46,17 @@ class ClineRooAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             original = Path.exists
+
             def exists(path):
                 if path == home / "Documents/Cline":
                     raise AssertionError("Documents must not be probed for detection")
                 return original(path)
-            with patch.object(u, "HOME", home), patch.object(u, "which", return_value=None), patch.object(Path, "exists", exists):
+
+            with (
+                patch.object(u, "HOME", home),
+                patch.object(u, "which", return_value=None),
+                patch.object(Path, "exists", exists),
+            ):
                 cline = next(a for a in u.agent_targets() if a["id"] == "cline")
                 self.assertFalse(u.detected(cline))
 
