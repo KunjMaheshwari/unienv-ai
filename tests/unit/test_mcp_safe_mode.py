@@ -83,6 +83,25 @@ class McpSafeModeTests(unittest.TestCase):
                     mcp.resolve(str(escape_link))
                 self.assertIn("outside allowed UNIENV_MCP_ROOTS", str(ctx_sym.exception))
 
+    def test_pandoc_sandbox_is_only_enabled_in_safe_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            src = root / "report.md"
+            src.write_text("![chart](chart.png)")
+            for mode, roots, sandbox in (
+                ("", "", False),
+                ("full", "", False),
+                ("readonly", "", True),
+                ("", str(root), True),
+            ):
+                with self.subTest(mode=mode, roots=roots):
+                    with (
+                        patch.dict(os.environ, {"UNIENV_MCP_MODE": mode, "UNIENV_MCP_ROOTS": roots}),
+                        patch.object(mcp, "run", return_value=(0, "", "", 0.0)) as run,
+                    ):
+                        mcp.t_convert_document({"input_path": str(src), "output_format": "docx"})
+                    self.assertEqual("--sandbox" in run.call_args.args[0], sandbox)
+
     def test_roots_hide_and_block_execution_and_installation(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"UNIENV_MCP_ROOTS": tmp, "UNIENV_MCP_MODE": "full"}):

@@ -15,13 +15,17 @@ stdout carries protocol messages only.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 from pathlib import Path
@@ -232,28 +236,132 @@ def workdir(cwd: str | None) -> Path:
     return d
 
 
+_LOCK = threading.Lock()
+_WRITE_LOCK = threading.Lock()
+_CURRENT_CTX = threading.local()
+_REQUEST_TOOLS: dict[object, str] = {}
+_CANCELLED_IDS: set[object] = set()
+_PROGRESS_INTERVAL = 10.0
+_POLL_INTERVAL = 0.1
+
+
+def _send(payload: dict | list) -> None:
+    with _WRITE_LOCK:
+        sys.stdout.write(json.dumps(payload, ensure_ascii=True) + "\n")
+        sys.stdout.flush()
+
+
+def _terminate_proc(proc: subprocess.Popen) -> None:
+    """Stop the process group, allowing the launcher time to clean up first."""
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(proc.pid, signal.SIGTERM)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=3.0)
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
+
+
+def _stop_and_drain(proc: subprocess.Popen, partial: str | bytes | None = None) -> str:
+    """Bound pipe draining even if a detached descendant keeps a pipe open."""
+    _terminate_proc(proc)
+    out = partial.decode(errors="replace") if isinstance(partial, bytes) else (partial or "")
+    try:
+        drained, _ = proc.communicate(timeout=2.0)
+        return drained or out
+    except subprocess.TimeoutExpired as exc:
+        if exc.stdout:
+            out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
+        return out
+    finally:
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=2.0)
+
+
+def cancel_request(request_id: object) -> bool:
+    """Ignore unknown/completed IDs and installs, which must finish or roll back."""
+    if request_id is None or not _valid_id(request_id):
+        return False
+    with _LOCK:
+        name = _REQUEST_TOOLS.get(request_id)
+        if name is None or name == "install_package":
+            return False
+        _CANCELLED_IDS.add(request_id)
+    return True
+
+
+def _is_cancelled() -> bool:
+    req_id = getattr(_CURRENT_CTX, "request_id", None)
+    with _LOCK:
+        return req_id in _CANCELLED_IDS
+
+
+def emit_progress(message: str) -> None:
+    tok = getattr(_CURRENT_CTX, "progress_token", None)
+    if tok is None or isinstance(tok, bool) or not isinstance(tok, (str, int)) or _is_cancelled():
+        return
+    value = getattr(_CURRENT_CTX, "progress_value", -1) + 1
+    _CURRENT_CTX.progress_value = value
+    _send(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": {"progressToken": tok, "progress": value, "message": message},
+        }
+    )
+
+
 def run(cmd: list[str], *, cwd: Path, timeout: int, env: dict[str, str] | None = None) -> tuple[int, str, str, float]:
-    """Run without a shell, stdin closed (agent-safe), output captured and capped."""
+    """Run a cancellable process group with periodic progress and bounded cleanup."""
     timeout = max(1, min(int(timeout or DEFAULT_TIMEOUT), MAX_TIMEOUT))
     start = time.monotonic()
+    if _is_cancelled():
+        return 130, "", "cancelled", 0.0
     try:
-        r = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=cwd,
             env=tool_env() if env is None else env,
             stdin=subprocess.DEVNULL,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             errors="replace",
-            timeout=timeout,
+            start_new_session=True,
         )
-        code, out, err = r.returncode, r.stdout, r.stderr
-    except subprocess.TimeoutExpired as e:
-        partial = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        code, out, err = 124, partial, f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})"
     except FileNotFoundError:
-        code, out, err = 127, "", f"command not found: {cmd[0]}"
-    return code, out, err, time.monotonic() - start
+        return 127, "", f"command not found: {cmd[0]}", time.monotonic() - start
+
+    next_progress = start + _PROGRESS_INTERVAL
+    while True:
+        if _is_cancelled():
+            return 130, _stop_and_drain(proc), "cancelled", time.monotonic() - start
+        remaining = timeout - (time.monotonic() - start)
+        if remaining <= 0:
+            out = _stop_and_drain(proc)
+            return (
+                124,
+                out,
+                f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})",
+                time.monotonic() - start,
+            )
+        try:
+            out, err = proc.communicate(timeout=min(_POLL_INTERVAL, remaining))
+            return proc.returncode, out, err, time.monotonic() - start
+        except subprocess.TimeoutExpired as exc:
+            if time.monotonic() >= next_progress:
+                emit_progress(f"Waiting for {Path(cmd[0]).name}")
+                next_progress = time.monotonic() + _PROGRESS_INTERVAL
+            if time.monotonic() - start >= timeout:
+                out = _stop_and_drain(proc, exc.stdout)
+                return (
+                    124,
+                    out,
+                    f"timed out after {timeout}s (raise timeout_s, max {MAX_TIMEOUT})",
+                    time.monotonic() - start,
+                )
 
 
 def cap(text: str, limit: int = MAX_OUTPUT) -> str:
@@ -351,6 +459,12 @@ def t_read_document(a: dict) -> str:
     raise ToolError(f"could not read {path.name}: {(err or 'no text extracted').strip()[:800]}")
 
 
+# CSV options: token 9 preserves displayed values; token 12 exports every sheet.
+# https://help.libreoffice.org/latest/en-US/text/shared/guide/csv_params.html
+_CSV_ALL_SHEETS_FILTER = "csv:Text - txt - csv (StarCalc):44,34,UTF8,1,,0,false,true,true,false,false,-1"
+_SPREADSHEET_EXT = {".xlsx", ".xls", ".ods"}
+
+
 def t_convert_document(a: dict) -> str:
     src = resolve(a["input_path"])
     if not src.exists():
@@ -367,21 +481,35 @@ def t_convert_document(a: dict) -> str:
     ext = src.suffix.lower()
     soffice = BIN / "soffice-safe"
 
-    def via_soffice(input_path: Path, target_fmt: str) -> Path:
+    def via_soffice(input_path: Path, target_fmt: str) -> list[Path]:
         with tempfile.TemporaryDirectory(dir=tool_env()["TMPDIR"]) as tmp:
             code, out, err, _ = run(
                 [str(soffice), "--convert-to", target_fmt, "--outdir", tmp, str(input_path)], cwd=Path(tmp), timeout=300
             )
-            produced = list(Path(tmp).glob(f"*.{target_fmt.split(':')[0]}"))
+            produced = sorted(Path(tmp).glob(f"*.{target_fmt.split(':')[0]}"))
             if code != 0 or not produced:
                 raise ToolError(f"LibreOffice conversion failed: {(err or out).strip()[:800] or 'no output'}")
-            shutil.move(str(produced[0]), dest)
-        return dest
+            if len(produced) == 1:
+                shutil.move(str(produced[0]), dest)
+                return [dest]
+            moved = []
+            for p in produced:
+                target = free_name(out_dir / p.name)
+                shutil.move(str(p), target)
+                moved.append(target)
+            return moved
+
+    def format_converted(paths: list[Path]) -> str:
+        if len(paths) == 1:
+            return f"Converted to {paths[0]}"
+        return f"Converted to {len(paths)} files:\n" + "\n".join(str(p) for p in paths)
 
     def via_pandoc(input_path: Path, to: str, target: Path) -> Path:
-        code, out, err, _ = run(
-            ["pandoc", "--sandbox", str(input_path), "-t", to, "-o", str(target)], cwd=input_path.parent, timeout=180
+        safe_mode = bool(os.environ.get("UNIENV_MCP_ROOTS", "").strip()) or (
+            os.environ.get("UNIENV_MCP_MODE", "").strip().lower() == "readonly"
         )
+        cmd = ["pandoc", *(["--sandbox"] if safe_mode else []), str(input_path), "-t", to, "-o", str(target)]
+        code, out, err, _ = run(cmd, cwd=input_path.parent, timeout=180)
         if code != 0:
             raise ToolError(f"pandoc failed: {err.strip()[:800]}")
         return target
@@ -419,17 +547,18 @@ def t_convert_document(a: dict) -> str:
 
     if fmt == "pdf":
         if ext in OFFICE_EXT:
-            return f"Converted to {via_soffice(src, 'pdf')}"
+            return format_converted(via_soffice(src, "pdf"))
         if ext in PANDOC_IN:  # pandoc → docx → LibreOffice → pdf (no LaTeX needed)
             with tempfile.TemporaryDirectory(dir=tool_env()["TMPDIR"]) as tmp:
                 mid = via_pandoc(src, "docx", Path(tmp) / f"{src.stem}.docx")
-                return f"Converted to {via_soffice(mid, 'pdf')}"
+                return format_converted(via_soffice(mid, "pdf"))
     if (
         ext in OFFICE_EXT
         and fmt in {"docx", "xlsx", "pptx", "odt", "ods", "odp", "csv", "html"}
         and not (ext == ".docx" and fmt in PANDOC_OUT)
     ):
-        return f"Converted to {via_soffice(src, fmt)}"
+        target_fmt = _CSV_ALL_SHEETS_FILTER if fmt == "csv" and ext in _SPREADSHEET_EXT else fmt
+        return format_converted(via_soffice(src, target_fmt))
     if ext in PANDOC_IN and fmt in PANDOC_OUT:
         return f"Converted to {via_pandoc(src, PANDOC_OUT[fmt], dest)}"
     raise ToolError(
@@ -657,6 +786,10 @@ def handle(msg: dict) -> dict | None:
     if has_id and not _valid_id(raw_id):
         return _invalid_request(None)
     if not has_id:  # notification (initialized, cancelled, ...): nothing to send back
+        if msg.get("method") == "notifications/cancelled":
+            raw_params = msg.get("params")
+            if isinstance(raw_params, dict) and "requestId" in raw_params:
+                cancel_request(raw_params["requestId"])
         return None
     method = msg["method"]
 
@@ -714,13 +847,35 @@ def handle(msg: dict) -> dict | None:
         missing = [k for k in tool["inputSchema"].get("required", []) if k not in args]
         if missing:
             return error(-32602, f"missing required argument(s): {', '.join(missing)}")
+        meta = params.get("_meta")
+        progress_token = meta.get("progressToken") if isinstance(meta, dict) else None
+        _CURRENT_CTX.request_id = mid
+        _CURRENT_CTX.progress_token = progress_token
+        _CURRENT_CTX.progress_value = -1
+        with _LOCK:
+            _REQUEST_TOOLS.setdefault(mid, tool_name)
         start = time.monotonic()
         try:
+            with _LOCK:
+                pre_cancelled = mid is not None and mid in _CANCELLED_IDS
+            if pre_cancelled:
+                raise ToolError("cancelled")
+            emit_progress(f"Starting {tool['name']}")
             text, is_error = tool["fn"](args), False
+            emit_progress(f"Completed {tool['name']}")
         except ToolError as e:
             text, is_error = str(e), True
         except Exception as e:  # never crash the server on a bad call
             text, is_error = f"{type(e).__name__}: {e}", True
+        finally:
+            _CURRENT_CTX.request_id = None
+            _CURRENT_CTX.progress_token = None
+        with _LOCK:
+            cancelled = mid in _CANCELLED_IDS
+            _CANCELLED_IDS.discard(mid)
+            _REQUEST_TOOLS.pop(mid, None)
+        if cancelled:
+            return None
         log(f"{tool['name']} {'failed' if is_error else 'ok'} in {time.monotonic() - start:.1f}s")
         return ok({"content": [{"type": "text", "text": text}], "isError": is_error})
     if method in ("resources/list", "prompts/list"):
@@ -746,8 +901,73 @@ def _safe_handle(msg) -> dict | None:
         }
 
 
+class _RawReply:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+
+def _dispatch_message(msg) -> dict | list | None:
+    if isinstance(msg, _RawReply):
+        return msg.payload
+    if isinstance(msg, list):
+        if not msg:
+            return _invalid_request()
+        replies = [r for r in (_dispatch_message(m) for m in msg) if r is not None]
+        return replies or None
+    try:
+        reply = _safe_handle(msg)
+        if isinstance(msg, dict) and _valid_id(msg.get("id")):
+            with _LOCK:
+                if msg.get("id") in _CANCELLED_IDS:
+                    return None
+        return reply
+    finally:
+        if isinstance(msg, dict) and msg.get("method") == "tools/call" and _valid_id(msg.get("id")):
+            with _LOCK:
+                _REQUEST_TOOLS.pop(msg.get("id"), None)
+                _CANCELLED_IDS.discard(msg.get("id"))
+
+
+def _register_requests(msg) -> None:
+    """Register queued calls before the reader can receive their cancellation."""
+    if isinstance(msg, list):
+        for item in msg:
+            _register_requests(item)
+    elif (
+        isinstance(msg, dict)
+        and msg.get("jsonrpc") == "2.0"
+        and msg.get("method") == "tools/call"
+        and "id" in msg
+        and _valid_id(msg["id"])
+    ):
+        params = msg.get("params")
+        name = params.get("name") if isinstance(params, dict) else None
+        if isinstance(name, str):
+            with _LOCK:
+                _REQUEST_TOOLS.setdefault(msg["id"], name)
+
+
 def serve() -> int:
     log(f"started (UniEnv home {UNIENV_HOME}, working folder {WORKDIR})")
+    work_q: queue.Queue = queue.Queue()
+    stop = object()
+
+    def _worker() -> None:
+        while True:
+            item = work_q.get()
+            if item is stop:
+                work_q.task_done()
+                break
+            try:
+                reply = _dispatch_message(item)
+                if reply:
+                    _send(reply)
+            finally:
+                work_q.task_done()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -755,19 +975,30 @@ def serve() -> int:
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
-            reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}
-        else:
-            if isinstance(msg, list):
-                if not msg:
-                    reply = _invalid_request()
-                else:
-                    replies = [r for r in (_safe_handle(m) for m in msg) if r is not None]
-                    reply = replies or None
-            else:
-                reply = _safe_handle(msg)
-        if reply:
-            sys.stdout.write(json.dumps(reply, ensure_ascii=True) + "\n")
-            sys.stdout.flush()
+            work_q.put(_RawReply({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}))
+            continue
+        if isinstance(msg, dict) and "id" not in msg and msg.get("method") == "notifications/cancelled":
+            _safe_handle(msg)
+            continue
+        with _LOCK:
+            busy = bool(_REQUEST_TOOLS)
+        if (
+            busy
+            and isinstance(msg, dict)
+            and msg.get("jsonrpc") == "2.0"
+            and msg.get("method") == "ping"
+            and "id" in msg
+            and _valid_id(msg.get("id"))
+        ):
+            reply = _safe_handle(msg)
+            if reply:
+                _send(reply)
+            continue
+        _register_requests(msg)
+        work_q.put(msg)
+
+    work_q.put(stop)
+    worker.join()
     return 0
 
 

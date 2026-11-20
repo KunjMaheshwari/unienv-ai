@@ -73,11 +73,18 @@ MCP safety annotations are hints to the client, not access controls. Approval pr
 - `UNIENV_MCP_ALLOW_INSTALL=0` hides and disables `install_package`. Boolean `false`, `no`, and `off` also disable it.
 - `UNIENV_MCP_ROOTS=~/Documents:~/Downloads:~/UniEnv` restricts document input, conversion output and working-directory parameters to these folders and their descendants after resolving symlinks. Include the workdir if you want outputs there. Empty means unrestricted; a nonempty list with no directories is rejected. Paths are separated by `:` on supported macOS/Linux systems.
 - Configuring roots also hides and disables `run_python`, `run_tool`, and `install_package`, even in full mode: arbitrary Python, command arguments and package installation cannot be confined by checking a working directory.
-- Conversion uses Pandoc's `--sandbox` so referenced local or remote resources cannot be read implicitly. Documents depending on external images or includes may lose those resources or fail to convert. Dangling symlinks count as occupied output names and are never reused.
+- Conversion uses Pandoc's `--sandbox` only when roots are configured or readonly mode is active, so referenced local or remote resources cannot be read implicitly in safe mode. Safe mode requires Pandoc 2.15 or newer; an older version fails rather than disabling the sandbox. Normal mode keeps compatibility with older Pandoc and embedded resources. Documents depending on external images or includes may lose those resources or fail to convert. Dangling symlinks count as occupied output names and are never reused.
 
 The Claude Desktop extension exposes **MCP mode**, **Allow package installation**, and **Allowed folders** alongside **Output folder** in its settings. Defaults preserve full access. For other clients, put the variables in the server's `env` configuration and restart the server.
 
 These controls restrict the server's exposed tools and explicit paths; they are not an OS sandbox. Document parsers and converters still run as your user, and concurrent filesystem changes can race path checks. Process untrusted documents using an OS sandbox or a separate account for stronger isolation. Without roots or readonly mode, `run_python` and `run_tool` have your account's filesystem and network access; disabling installation alone does not limit code execution.
+## Cancellation and progress
+
+Long-running tool calls run on a worker while the server continues answering pings and cancellation notifications. When a call supplies `params._meta.progressToken`, the server reports its start, sends progress approximately every 10 seconds while waiting for a child process, and reports completion. Progress is an increasing activity counter, not a percentage; the total is omitted because the amount of work is unknown.
+
+Send `notifications/cancelled` with the original `requestId` to cancel a queued or running tool call. The server stops its process group, cleans up, and does not send a response for an accepted cancellation. Unknown, completed, and malformed cancellation IDs are ignored. Package installation is deliberately non-cancellable: cancellation is ignored and the normal response is sent after the install completes or rolls back. This protects package state from interruption.
+
+Timeout and cancellation cleanup share a process-group termination helper and a bounded pipe drain. Descendants that deliberately detach into a new session cannot be terminated by killing the original process group; however, an inherited open pipe cannot hold the MCP worker indefinitely.
 
 ## What it can't do
 
