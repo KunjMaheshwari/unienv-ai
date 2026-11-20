@@ -10,13 +10,14 @@ license_note = "Tectonic MIT; TeX Live bundles under various free licenses"
 brew = ["tectonic"]
 
 [system.debian]
-apt = ["tectonic"]
+apt = []
 
 [verify]
 bins = ["tectonic"]
 
 [agent]
 notes = """
+- On Linux, install Tectonic from https://tectonic-typesetting.github.io/en-US/install.html; it is not available from Debian/Ubuntu apt. Doctor reports it missing until installed.
 - Compile a LaTeX file to PDF: `tectonic paper.tex` (automatically runs multiple passes, BibTeX/biber, and downloads needed TeX packages on first use).
 - Write output to a specific folder: `tectonic -o out/ paper.tex`.
 - Keep intermediate `.log` / `.aux` files when debugging compile errors: `tectonic --keep-logs --keep-intermediates paper.tex`.
