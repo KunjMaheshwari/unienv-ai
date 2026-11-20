@@ -59,6 +59,19 @@ class HelperTests(unittest.TestCase):
             self.assertFalse(u.remove_block(path, u.SHELL_BEGIN, u.SHELL_END))
             self.assertEqual(path.read_text(), initial)
 
+    def test_whitespace_orphan_markers_preserve_bytes_across_two_syncs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / ".zshenv"
+            for marker in (u.SHELL_BEGIN + " ", "\t" + u.SHELL_BEGIN + "\t", u.SHELL_END + " "):
+                with self.subTest(marker=marker):
+                    initial = ("export A=1\r\n" + marker + "\r\nalias gs='git status'\r\n").encode()
+                    path.write_bytes(initial)
+                    for body in ("first", "second"):
+                        self.assertFalse(u.upsert_block(path, body, u.SHELL_BEGIN, u.SHELL_END))
+                        self.assertEqual(path.read_bytes(), initial)
+                    self.assertFalse(u.remove_block(path, u.SHELL_BEGIN, u.SHELL_END))
+                    self.assertEqual(path.read_bytes(), initial)
+
     def test_malformed_block_variants_detected_and_reported_by_doctor(self):
         import argparse
         import io
