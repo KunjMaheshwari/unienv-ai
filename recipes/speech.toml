@@ -23,6 +23,6 @@ bins = ["ffmpeg"]
 notes = """
 - Local audio/video transcription via `ue-py` with `faster-whisper` (CTranslate2 backend, no PyTorch required).
 - Default to the `small` model with `compute_type="int8"` on CPU, and share the model cache under `~/.unienv/cache/hf`:
-  `from faster_whisper import WhisperModel; model = WhisperModel("small", device="cpu", compute_type="int8", download_root="~/.unienv/cache/hf")`
+  `import os; from faster_whisper import WhisperModel; model = WhisperModel("small", device="cpu", compute_type="int8", download_root=os.path.expanduser("~/.unienv/cache/hf"))`
 - Extract or normalize audio before transcription when needed with `ffmpeg -i input.mp4 -vn -ac 1 -ar 16000 audio.wav`.
 """

@@ -1,0 +1,17 @@
+name: speech
+on:
+  pull_request:
+    paths:
+      - recipes/speech.toml
+      - .github/workflows/speech.yml
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify speech dependencies and measure installed size
+        run: |
+          python3 -m pip install --target "$RUNNER_TEMP/speech-packages" faster-whisper
+          PYTHONPATH="$RUNNER_TEMP/speech-packages" python3 -c 'import faster_whisper'
+          du -sm "$RUNNER_TEMP/speech-packages"

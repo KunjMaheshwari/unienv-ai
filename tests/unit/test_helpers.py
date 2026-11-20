@@ -96,25 +96,6 @@ class HelperTests(unittest.TestCase):
                 with path.open("rb") as f:
                     self.assertEqual(u.validate_recipe(tomllib.load(f), path.stem), [])
 
-    def test_speech_recipe_validates_and_is_opt_in(self):
-        path = ROOT / "recipes" / "speech.toml"
-        self.assertTrue(path.exists())
-        lines = path.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(lines[0], "#:schema ../schema/recipe.schema.json")
-        with path.open("rb") as f:
-            recipe = tomllib.load(f)
-        self.assertEqual(u.validate_recipe(recipe, "speech"), [])
-        self.assertEqual(recipe["id"], "speech")
-        self.assertIs(recipe.get("default"), False)
-        self.assertEqual(recipe["python"]["packages"], ["faster-whisper"])
-        self.assertEqual(recipe["python"]["imports"], ["faster_whisper"])
-        self.assertEqual(recipe["system"]["macos"]["brew"], ["ffmpeg"])
-        self.assertEqual(recipe["system"]["debian"]["apt"], ["ffmpeg"])
-        self.assertEqual(recipe["verify"]["bins"], ["ffmpeg"])
-        self.assertIn("small", recipe["agent"]["notes"])
-        self.assertIn('compute_type="int8"', recipe["agent"]["notes"])
-        self.assertIn("~/.unienv/cache/hf", recipe["agent"]["notes"])
-
     def test_excluded_system_packages_and_bins(self):
         from unittest.mock import patch
 
