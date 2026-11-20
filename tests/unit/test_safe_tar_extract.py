@@ -43,21 +43,38 @@ class SafeTarExtractTests(unittest.TestCase):
             u._safe_extract_tar(tar, dest)
             self.assertEqual((dest / "unienv-ai-main/src/unienv.py").read_text(), "print('ok')\n")
 
-    def test_fallback_extracts_safe_members_and_internal_symlink(self):
+    def test_fallback_extracts_only_regular_files_and_directories(self):
         entries = [
-            ("unienv-ai-main/bin/unienv", b"#!/bin/sh\n", tarfile.REGTYPE, ""),
-            ("unienv-ai-main/bin/ue", None, tarfile.SYMTYPE, "unienv"),
+            ("unienv-ai-main", None, tarfile.DIRTYPE, ""),
+            ("unienv-ai-main/unienv.py", b"print('ok')", tarfile.REGTYPE, ""),
         ]
-        with (
-            _build_tar(entries) as tar,
-            tempfile.TemporaryDirectory() as tmp,
-            patch.object(tarfile, "data_filter", None),
-        ):
-            delattr(tarfile, "data_filter")
-            dest = pathlib.Path(tmp)
-            u._safe_extract_tar(tar, dest)
-            self.assertEqual((dest / "unienv-ai-main/bin/unienv").read_text(), "#!/bin/sh\n")
-            self.assertTrue((dest / "unienv-ai-main/bin/ue").is_symlink())
+        with _build_tar(entries) as tar, tempfile.TemporaryDirectory() as tmp:
+            with patch.object(tarfile, "data_filter", None):
+                u._safe_extract_tar(tar, pathlib.Path(tmp))
+            self.assertEqual((pathlib.Path(tmp) / "unienv-ai-main/unienv.py").read_bytes(), b"print('ok')")
+
+    def test_fallback_rejects_chained_symlink_escape_before_extracting(self):
+        entries = [
+            ("t", None, tarfile.SYMTYPE, "."),
+            ("s", None, tarfile.SYMTYPE, "t/.."),
+            ("s/evil", b"escaped", tarfile.REGTYPE, ""),
+        ]
+        with tempfile.TemporaryDirectory() as tmp, _build_tar(entries) as tar:
+            dest = pathlib.Path(tmp) / "dest"
+            dest.mkdir()
+            with patch.object(tarfile, "data_filter", None):
+                with self.assertRaises(ValueError):
+                    u._safe_extract_tar(tar, dest)
+            self.assertEqual(list(dest.iterdir()), [])
+            self.assertFalse((pathlib.Path(tmp) / "evil").exists())
+
+    def test_fallback_rejects_even_internal_links(self):
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                with _build_tar([("file", b"ok", tarfile.REGTYPE, ""), ("link", None, kind, "file")]) as tar:
+                    with patch.object(tarfile, "data_filter", None), self.assertRaises(ValueError):
+                        u._safe_extract_tar(tar, pathlib.Path(tmp))
+                self.assertEqual(list(pathlib.Path(tmp).iterdir()), [])
 
     def test_fallback_rejects_parent_traversal(self):
         with (

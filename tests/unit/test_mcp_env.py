@@ -2,11 +2,10 @@
 
 import importlib.util
 import os
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).parents[2]
 spec = importlib.util.spec_from_file_location("unienv_mcp", ROOT / "src" / "unienv_mcp.py")
@@ -64,15 +63,16 @@ class ToolEnvTests(unittest.TestCase):
     def test_run_python_receives_proxy_and_ca_but_no_credentials_or_publish_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake_environ = _sample_environ(tmp)
-            fake_proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
+            fake_proc = MagicMock(returncode=0)
+            fake_proc.communicate.return_value = ("ok\n", "")
             with (
                 patch.dict(os.environ, fake_environ, clear=True),
                 patch.object(mcp, "WORKDIR", Path(tmp)),
-                patch.object(mcp.subprocess, "run", return_value=fake_proc) as mock_run,
+                patch.object(mcp.subprocess, "Popen", return_value=fake_proc) as mock_popen,
             ):
                 mcp.t_run_python({"code": "print('ok')", "cwd": tmp})
 
-            env = mock_run.call_args.kwargs["env"]
+            env = mock_popen.call_args.kwargs["env"]
             for expected_key in (
                 "HTTP_PROXY",
                 "HTTPS_PROXY",
@@ -89,14 +89,15 @@ class ToolEnvTests(unittest.TestCase):
     def test_install_package_receives_index_proxy_ca_and_homebrew_settings_without_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake_environ = _sample_environ(tmp)
-            fake_proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="installed\n", stderr="")
+            fake_proc = MagicMock(returncode=0)
+            fake_proc.communicate.return_value = ("installed\n", "")
             with (
                 patch.dict(os.environ, fake_environ, clear=True),
-                patch.object(mcp.subprocess, "run", return_value=fake_proc) as mock_run,
+                patch.object(mcp.subprocess, "Popen", return_value=fake_proc) as mock_popen,
             ):
                 mcp.t_install_package({"name": "pandas", "kind": "python"})
 
-            env = mock_run.call_args.kwargs["env"]
+            env = mock_popen.call_args.kwargs["env"]
             for expected_key in (
                 "HTTP_PROXY",
                 "HTTPS_PROXY",
