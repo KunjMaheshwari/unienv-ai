@@ -18,6 +18,43 @@ TINY_PNG = base64.b64decode(
 
 
 class McpImageContentTests(unittest.TestCase):
+    def test_mismatched_and_truncated_images_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for index, raw in enumerate((b"not an image", TINY_PNG[:20], b"\xff\xd8\xff")):
+                path = root / f"bad{index}.png"
+                path.write_bytes(raw)
+                self.assertEqual(mcp._image_blocks([path]), [])
+            good = root / "good.png"
+            good.write_bytes(TINY_PNG)
+            self.assertEqual(len(mcp._image_blocks([good])), 1)
+
+    def test_size_cap_applies_to_direct_image_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            img = pathlib.Path(tmp) / "huge.png"
+            img.write_bytes(TINY_PNG + b"x" * mcp.MAX_INLINE_IMAGE_BYTES)
+            with (
+                patch.object(mcp, "which", return_value="tesseract"),
+                patch.object(mcp, "run", return_value=(0, "OCR text", "", 0.1)),
+            ):
+                result = mcp.t_read_document({"path": str(img), "include_image": True})
+            self.assertIsInstance(result, str)
+            self.assertIn("OCR text", result)
+
+    def test_run_python_scans_changed_files_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            image = root / "chart.png"
+            image.write_bytes(TINY_PNG)
+            with (
+                patch.object(mcp, "tool_env", return_value={"TMPDIR": tmp}),
+                patch.object(mcp, "run", return_value=(0, "done", "", 0.1)),
+                patch.object(mcp, "changed_files", return_value=[str(image)]) as changed,
+            ):
+                result = mcp.t_run_python({"code": "pass", "cwd": tmp})
+            changed.assert_called_once()
+            self.assertEqual(result[1]["type"], "image")
+
     def test_convert_document_pdf_to_png_returns_image_blocks_capped_at_4(self):
         with tempfile.TemporaryDirectory() as tmp:
             work = pathlib.Path(tmp)
