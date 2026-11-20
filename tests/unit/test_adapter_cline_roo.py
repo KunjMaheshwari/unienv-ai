@@ -42,6 +42,18 @@ class ClineRooAdapterTests(unittest.TestCase):
                 cline = next(a for a in u.agent_targets() if a["id"] == "cline")
                 self.assertTrue(u.detected(cline))
 
+    def test_absent_cline_does_not_probe_documents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            original = Path.exists
+            def exists(path):
+                if path == home / "Documents/Cline":
+                    raise AssertionError("Documents must not be probed for detection")
+                return original(path)
+            with patch.object(u, "HOME", home), patch.object(u, "which", return_value=None), patch.object(Path, "exists", exists):
+                cline = next(a for a in u.agent_targets() if a["id"] == "cline")
+                self.assertFalse(u.detected(cline))
+
     def test_roo_code_detection_via_dir_or_vscode_ext(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -92,8 +104,8 @@ class ClineRooAdapterTests(unittest.TestCase):
                 ):
                     u.cmd_uninstall(argparse.Namespace(purge=False))
 
-                self.assertIsNone(u.read_block(cline_rules, u.MD_BEGIN, u.MD_END))
-                self.assertIsNone(u.read_block(roo_rules, u.MD_BEGIN, u.MD_END))
+                self.assertFalse(cline_rules.exists())
+                self.assertFalse(roo_rules.exists())
 
 
 if __name__ == "__main__":

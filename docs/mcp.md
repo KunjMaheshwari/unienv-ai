@@ -65,6 +65,14 @@ New files go to **`~/UniEnv`** unless you or Claude give another path (override 
 - `unienv doctor` performs a real MCP handshake against every configured app.
 - Tested end-to-end in CI (`tests/mcp_test.py`) and with a real MCP client: Claude Code headless with only this server and no shell tools, which created a Word file and its PDF in 24 s.
 
+## Cancellation and progress
+
+Long-running tool calls run on a worker while the server continues answering pings and cancellation notifications. When a call supplies `params._meta.progressToken`, the server reports its start, sends progress approximately every 10 seconds while waiting for a child process, and reports completion. Progress is an increasing activity counter, not a percentage; the total is omitted because the amount of work is unknown.
+
+Send `notifications/cancelled` with the original `requestId` to cancel a queued or running tool call. The server stops its process group, cleans up, and does not send a response for an accepted cancellation. Unknown, completed, and malformed cancellation IDs are ignored. Package installation is deliberately non-cancellable: cancellation is ignored and the normal response is sent after the install completes or rolls back. This protects package state from interruption.
+
+Timeout and cancellation cleanup share a process-group termination helper and a bounded pipe drain. Descendants that deliberately detach into a new session cannot be terminated by killing the original process group; however, an inherited open pipe cannot hold the MCP worker indefinitely.
+
 ## What it can't do
 
 - **Claude.ai on the web / ChatGPT on the web** can't reach your computer at all; MCP servers only run where the app runs.
