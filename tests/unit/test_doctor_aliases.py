@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +19,22 @@ spec.loader.exec_module(u)
 
 
 class DoctorAliasTests(unittest.TestCase):
+    def test_timeout_is_reported_and_probe_uses_fifteen_seconds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".bashrc").write_text("exec tmux")
+            diagnostics = []
+            with (
+                patch.object(u, "HOME", home),
+                patch.object(Path, "exists", return_value=True),
+                patch.object(u.subprocess, "run", side_effect=subprocess.TimeoutExpired("bash", 15)) as run,
+            ):
+                self.assertEqual(u._probe_shell_aliases(diagnostics), [])
+            self.assertTrue(any("timed out" in message for _, message in diagnostics))
+            self.assertTrue(all(call.kwargs["timeout"] == 15 for call in run.call_args_list))
+            bash = next(call for call in run.call_args_list if call.args[0][0] == "/bin/bash")
+            self.assertNotIn(". ~/.bashrc", bash.args[0][-1])
+
     def test_parse_alias_output_handles_multiple_aliases_per_line_and_shell_formats(self):
         sample = """
         # Commented alias ls='eza'
