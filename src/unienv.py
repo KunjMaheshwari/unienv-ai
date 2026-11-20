@@ -279,19 +279,32 @@ def atomic_write(path: Path, text: str) -> None:
 @contextlib.contextmanager
 def state_lock():
     """Serialise commands that change ~/.unienv: parallel agents often run `unienv need` at once."""
-    try:
-        import fcntl
-    except ImportError:  # no flock (Windows): run unlocked
-        yield
-        return
     UNIENV_HOME.mkdir(parents=True, exist_ok=True)
-    with open(UNIENV_HOME / ".lock", "w") as f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print("waiting for another unienv command to finish…", file=sys.stderr, flush=True)
+    with open(UNIENV_HOME / ".lock", "a+b") as f:
+        if IS_WIN:
+            import msvcrt
+
+            f.seek(0, 2)
+            if not f.tell():
+                f.write(b"0")
+                f.flush()
+            while True:
+                f.seek(0)
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            try:
+                yield
+            finally:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
             fcntl.flock(f, fcntl.LOCK_EX)
-        yield  # released when the file is closed
+            yield
 
 
 def read_block(path: Path, begin: str, end: str) -> str | None:
@@ -505,6 +518,11 @@ def install_system(w: dict, *, assume_yes: bool) -> list[str]:
                 if line.strip() and not line.strip().startswith(("Installed", "---"))
             }
             pkgs = [p for p in w["scoop"] if p.split("/")[-1].lower() not in have_s]
+            if "libreoffice" in pkgs:
+                bucket = run([scoop, "bucket", "add", "extras"], check=False)
+                if bucket.returncode:
+                    failures.append("scoop:extras")
+                    pkgs = [p for p in pkgs if p != "libreoffice"]
             for p in pkgs:
                 if run([scoop, "install", p], check=False).returncode != 0:
                     failures.append(f"scoop:{p}")
@@ -593,11 +611,13 @@ def write_package_json(packages: list[str]) -> None:
     pj.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def install_node(packages: list[str]) -> None:
+def install_node(packages: list[str], *, require_npm: bool = False) -> None:
     if not packages:
         return
     npm = which("npm")
     if not npm:
+        if require_npm:
+            raise RuntimeError("npm not found: install Node.js (`unienv need --bin node`)")
         warn("npm not found; skipping Node batteries (install Node.js, then `unienv install`).")
         return
     write_package_json(packages)
@@ -618,25 +638,43 @@ def write_shims() -> None:
             continue
         text = tpl.read_text().replace("@UNIENV_HOME@", str(UNIENV_HOME)).replace("@NODE@", node)
         dst = BIN / tpl.name
-        dst.write_text(text)
-        dst.chmod(0o755)
-    # the CLI itself: always run with the interpreter that is running us now
-    # (a uv-managed 3.12, never Homebrew's python), so it survives env breakage
+        dst.write_text(text, newline="")
+        dst.chmod(493)
     cli = BIN / "unienv"
-    cli.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{Path(__file__).resolve()}" "$@"\n')
-    cli.chmod(0o755)
+    cli.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{Path(__file__).resolve()}" "$@"\n', newline="")
+    cli.chmod(493)
     ue = BIN / "ue"
     if ue.is_symlink() or ue.exists():
         ue.unlink()
     if IS_WIN:
         py_exe = venv_python()
-        (BIN / "ue-py.cmd").write_text(f'@echo off\r\nset PYTHONUTF8=1\r\n"{py_exe}" %*\r\n')
+        (BIN / "ue-py.cmd").write_text(f'@echo off\r\nset PYTHONUTF8=1\r\n"{py_exe}" %*\r\n', newline="")
         (BIN / "ue-node.cmd").write_text(
-            f'@echo off\r\nset "NODE_PATH={UNIENV_HOME / "node" / "node_modules"};%NODE_PATH%"\r\n"{node}" %*\r\n'
+            f'''@echo off\r\nset "NODE_PATH={UNIENV_HOME / "node" / "node_modules"};%NODE_PATH%"\r\n"{node}" %*\r\n''',
+            newline="",
         )
         cli_cmd = f'@echo off\r\nset PYTHONUTF8=1\r\n"{sys.executable}" "{Path(__file__).resolve()}" %*\r\n'
-        (BIN / "unienv.cmd").write_text(cli_cmd)
-        (BIN / "ue.cmd").write_text(cli_cmd)
+        (BIN / "unienv.cmd").write_text(cli_cmd, newline="")
+        (BIN / "ue.cmd").write_text(cli_cmd, newline="")
+        wrappers = {
+            "ue-py": [str(py_exe)],
+            "ue": [sys.executable, str(Path(__file__).resolve())],
+            "unienv": [sys.executable, str(Path(__file__).resolve())],
+            "soffice-safe": [sys.executable, str(Path(__file__).resolve()), "_soffice-safe"],
+        }
+        import shlex
+
+        for name, argv in wrappers.items():
+            command = " ".join((shlex.quote(arg.replace("\\", "/")) for arg in argv))
+            (BIN / name).write_text(f'#!/bin/sh\nexport PYTHONUTF8=1\nexec {command} "$@"\n', newline="")
+        node_path = str(NODE_DIR / "node_modules").replace("\\", "/")
+        (BIN / "ue-node").write_text(
+            f'''#!/bin/sh\nexport NODE_PATH="{node_path};$NODE_PATH"\nexec "{node.replace(chr(92), "/")}" "$@"\n''',
+            newline="",
+        )
+        (BIN / "soffice-safe.cmd").write_text(
+            f'@echo off\r\n"{sys.executable}" "{Path(__file__).resolve()}" _soffice-safe %*\r\n', newline=""
+        )
     else:
         ue.symlink_to("unienv")
 
@@ -806,6 +844,15 @@ def agent_targets() -> list[dict]:
             "instructions": HOME / ".config/opencode/AGENTS.md",
             "skills": None,
         },
+        {
+            # https://docs.windsurf.com/windsurf/cascade/memories#rules
+            "id": "windsurf",
+            "name": "Windsurf",
+            "detect": [HOME / ".codeium/windsurf"],
+            "bin": "windsurf",
+            "instructions": HOME / ".codeium/windsurf/memories/global_rules.md",
+            "skills": None,
+        },
     ]
 
 
@@ -835,6 +882,8 @@ def sync_agents(manifest: dict, recipes: list[dict], *, only_detected: bool = Tr
 
 
 def wire_shells() -> list[str]:
+    if IS_WIN:
+        return []
     body = f'[ -f "{ENV_SH}" ] && . "{ENV_SH}"'
     changed = []
     for rc in SHELL_FILES:
@@ -1021,7 +1070,7 @@ def cmd_need(args) -> int:
         if kind == "python":
             install_python(w["python"])
         elif kind == "node":
-            install_node(w["node"])
+            install_node(w["node"], require_npm=True)
         else:
             failed = install_system(
                 {
@@ -1053,6 +1102,154 @@ def cmd_need(args) -> int:
     log_event(event="need", kind=kind, packages=new, curated=not uncurated)
     via = {"python": "ue-py", "node": "ue-node"}.get(kind, "PATH")
     info(f"✓ installed {', '.join(new)}; available to every AI tool via {via}")
+    return 0
+
+
+def _verify_python_imports(recipes: list[dict]) -> dict[str, str]:
+    """Verify battery Python imports. Returns a dict of {module: error_string} for failures."""
+    imports = uniq([m for r in recipes for m in r.get("python", {}).get("imports", [])])
+    if not imports:
+        return {}
+    py = PY_DIR / ".venv/bin/python"
+    if not py.exists():
+        return {"python": "shared Python env missing"}
+    code = (
+        "import importlib, json\nbad = {}\n"
+        f"for m in {imports!r}:\n"
+        "    try: importlib.import_module(m)\n"
+        "    except Exception as e: bad[m] = f'{type(e).__name__}: {e}'[:120]\n"
+        "print(json.dumps(bad))"
+    )
+    r = run([str(py), "-P", "-c", code], capture=True, check=False, timeout=120)
+    if r.returncode != 0:
+        return {"python": (r.stderr or r.stdout or "import check failed").strip()[:200]}
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return {"python": "could not parse import check output"}
+
+
+def cmd_upgrade(args) -> int:
+    recipes_all = load_recipes()
+    state = load_state(recipes_all)
+    recipes = active_recipes(recipes_all, state)
+    w = wanted(recipes, state)
+    pkgs = args.packages or []
+    do_py = not args.node
+    do_node = bool(args.node) or (not pkgs and bool(w["node"]))
+
+    if args.dry_run:
+        if do_py and (PY_DIR / "pyproject.toml").exists():
+            uv = find_uv()
+            uv_cmd = [uv, "lock", "--project", str(PY_DIR), "--managed-python", "--dry-run"]
+            if pkgs:
+                for p in pkgs:
+                    uv_cmd.extend(["--upgrade-package", py_name(p)])
+            else:
+                uv_cmd.append("--upgrade")
+            r = run(uv_cmd, capture=True, check=False, env={"UV_PROJECT_ENVIRONMENT": str(PY_DIR / ".venv")})
+            out = ((r.stdout or "") + (r.stderr or "")).strip()
+            info(out or "Python packages: all up to date")
+        if do_node and (NODE_DIR / "package.json").exists():
+            npm = which("npm")
+            if npm:
+                r = run([npm, "outdated", *pkgs], cwd=NODE_DIR, capture=True, check=False)
+                out = (r.stdout or "").strip()
+                info(out or "Node packages: all up to date")
+        return 0
+
+    before_py = python_packages() if do_py else {}
+    before_node = node_packages(w["node"]) if do_node else {}
+
+    tracked = [
+        STATE_FILE,
+        PY_DIR / "pyproject.toml",
+        PY_DIR / "uv.lock",
+        NODE_DIR / "package.json",
+        NODE_DIR / "package-lock.json",
+    ]
+    existed = {f: f.exists() for f in tracked}
+    snap = BACKUP_DIR / _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    snap.mkdir(parents=True, exist_ok=True)
+    for f in tracked:
+        if existed[f]:
+            shutil.copy2(f, snap / f"{f.parent.name}__{f.name}")
+
+    try:
+        if do_py:
+            uv = find_uv()
+            write_pyproject(w["python"])
+            uv_cmd = [uv, "lock", "--project", str(PY_DIR), "--managed-python"]
+            if pkgs:
+                for p in pkgs:
+                    uv_cmd.extend(["--upgrade-package", py_name(p)])
+            else:
+                uv_cmd.append("--upgrade")
+            run(uv_cmd, env={"UV_PROJECT_ENVIRONMENT": str(PY_DIR / ".venv")})
+            install_python(w["python"])
+            bad_imports = _verify_python_imports(recipes)
+            if bad_imports:
+                details = "; ".join(f"{m}: {err}" for m, err in bad_imports.items())
+                raise RuntimeError(f"import check failed after upgrade ({details})")
+        if do_node and w["node"]:
+            npm = which("npm")
+            if not npm:
+                if args.node:
+                    raise RuntimeError("npm not found")
+                warn("npm not found; skipping Node upgrade")
+            else:
+                if not (NODE_DIR / "package.json").exists():
+                    write_package_json(w["node"])
+                run(
+                    [
+                        npm,
+                        "update",
+                        "--save",
+                        "--no-audit",
+                        "--no-fund",
+                        "--loglevel=error",
+                        "--progress=false",
+                        "--no-update-notifier",
+                        *pkgs,
+                    ],
+                    cwd=NODE_DIR,
+                )
+    except (subprocess.CalledProcessError, RuntimeError, SystemExit) as e:
+        warn(f"upgrade failed ({e}); rolling back")
+        for f in tracked:
+            if existed[f]:
+                shutil.copy2(snap / f"{f.parent.name}__{f.name}", f)
+            elif f.exists():
+                f.unlink()
+        state = load_state(recipes_all)
+        try:
+            if do_py and existed[PY_DIR / "pyproject.toml"]:
+                install_python(wanted(recipes, state)["python"])
+            if do_node and existed[NODE_DIR / "package.json"]:
+                install_node(wanted(recipes, state)["node"])
+        except (subprocess.CalledProcessError, RuntimeError, SystemExit) as re_err:
+            warn(f"rollback re-install failed ({re_err}); run unienv install to repair")
+        log_event(event="upgrade-failed", packages=pkgs, node=bool(args.node))
+        return 1
+
+    after_py = python_packages() if do_py else {}
+    after_node = node_packages(w["node"]) if do_node else {}
+    changes = []
+    for k in sorted(set(before_py) | set(after_py)):
+        b, a = before_py.get(k), after_py.get(k)
+        if b != a and a is not None:
+            changes.append(f"{k} {b or '(new)'} -> {a}")
+    for k in sorted(set(before_node) | set(after_node)):
+        b, a = before_node.get(k), after_node.get(k)
+        if b != a and a is not None:
+            changes.append(f"node:{k} {b or '(new)'} -> {a}")
+
+    do_sync(state, recipes_all, quiet=True)
+    log_event(event="upgrade", packages=pkgs, changes=changes)
+    if changes:
+        info("✓ upgraded: " + ", ".join(changes))
+    else:
+        info("✓ all packages already at latest compatible versions")
     return 0
 
 
@@ -1112,7 +1309,7 @@ def cmd_status(args) -> int:
     return 0
 
 
-REPO_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/archive/refs/heads/{ref}.tar.gz"
+REPO_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/archive/{ref}.tar.gz"
 
 
 # ── MCP server for desktop apps ─────────────────────────────────────────────
@@ -1237,6 +1434,7 @@ def cmd_update(args) -> int:
     """Download the latest UniEnv, replace ~/.unienv/share, then re-run install with the new code."""
     import tarfile
     import tempfile
+    import urllib.error
     import urllib.request
 
     share = UNIENV_HOME / "share"
@@ -1246,7 +1444,11 @@ def cmd_update(args) -> int:
     step(f"Downloading {url}")
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "unienv.tar.gz"
-        urllib.request.urlretrieve(url, archive)
+        try:
+            with urllib.request.urlopen(url) as resp, archive.open("wb") as out:
+                shutil.copyfileobj(resp, out)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+            die(f"could not download UniEnv ref {args.ref!r} ({e}); check the branch or tag name")
         with tarfile.open(archive) as tar:
             tar.extractall(tmp, filter="data")
         src = next(Path(tmp).glob("unienv-ai-*"))
@@ -1592,7 +1794,26 @@ def cmd_wire(args) -> int:
     return 0
 
 
+def _remove_windows_path() -> None:
+    marker = UNIENV_HOME / "windows-path.json"
+    if not IS_WIN or not marker.exists():
+        return
+    import winreg
+
+    owned = json.loads(marker.read_text(encoding="utf-8-sig"))["entry"]
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+        current, kind = winreg.QueryValueEx(key, "Path")
+        parts = current.split(";")
+        for i, part in enumerate(parts):
+            if os.path.normcase(part.rstrip("\\\\/")) == os.path.normcase(owned.rstrip("\\\\/")):
+                del parts[i]
+                break
+        winreg.SetValueEx(key, "Path", 0, kind, ";".join(parts))
+    marker.unlink()
+
+
 def cmd_uninstall(args) -> int:
+    _remove_windows_path()
     for rc in SHELL_FILES:
         try:
             if remove_block(rc, SHELL_BEGIN, SHELL_END):
@@ -1633,6 +1854,30 @@ def cmd_uninstall(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "_soffice-safe":
+        import tempfile
+
+        soffice = os.environ.get("UNIENV_SOFFICE") or libreoffice_path()
+        if not soffice:
+            warn("LibreOffice is not installed")
+            return 127
+        with tempfile.TemporaryDirectory(prefix="ue_lo_") as profile:
+            return run(
+                [
+                    soffice,
+                    "-env:UserInstallation=" + Path(profile).as_uri(),
+                    "--headless",
+                    "--invisible",
+                    "--norestore",
+                    "--nologo",
+                    "--nodefault",
+                    "--nolockcheck",
+                    *argv[1:],
+                ],
+                check=False,
+            ).returncode
     p = argparse.ArgumentParser(
         prog="unienv",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1668,6 +1913,12 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     g.add_argument("--cask", action="store_true", help="macOS app (Homebrew cask)")
     s.add_argument("-y", "--yes", action="store_true")
     s.set_defaults(fn=cmd_need)
+
+    s = sub.add_parser("upgrade", help="upgrade installed Python and Node packages with automatic rollback")
+    s.add_argument("packages", nargs="*", help="specific packages to upgrade (default: all)")
+    s.add_argument("--node", action="store_true", help="upgrade Node packages")
+    s.add_argument("--dry-run", action="store_true", help="show what would be upgraded without changing anything")
+    s.set_defaults(fn=cmd_upgrade)
 
     s = sub.add_parser("doctor", help="verify tools, shell wiring, agent files and secrets hygiene")
     s.add_argument("--json", action="store_true", help="machine-readable output for agents and CI")
@@ -1713,7 +1964,11 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.set_defaults(fn=lambda a: print(BIN) or 0)
 
     args = p.parse_args(argv)
-    mutating = args.cmd in ("install", "need", "sync", "uninstall") or (args.cmd == "doctor" and args.fix)
+    mutating = (
+        args.cmd in ("install", "need", "sync", "uninstall")
+        or (args.cmd == "upgrade" and not args.dry_run)
+        or (args.cmd == "doctor" and args.fix)
+    )
     try:
         with state_lock() if mutating else contextlib.nullcontext():
             return args.fn(args)
