@@ -70,7 +70,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pandoc poppler-utils qpdf ghostscript tesseract-ocr jq ripgrep
+          sudo apt-get install -y pandoc poppler-utils qpdf ghostscript tesseract-ocr jq ripgrep nodejs npm
 
       - name: Install (macOS without LibreOffice to keep CI fast)
         if: runner.os == 'macOS'
