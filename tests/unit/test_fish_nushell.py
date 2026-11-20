@@ -5,6 +5,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,23 +31,24 @@ class FishNushellTests(unittest.TestCase):
                 patch.object(u, "UNIENV_HOME", unienv_home),
                 patch.object(u, "ENV_SH", unienv_home / "env.sh"),
                 patch.object(u, "SHELL_FILES", [home / ".zshenv", home / ".profile", home / ".bashrc"]),
-                patch.object(u, "IS_MAC", True),
+                patch.object(u, "IS_MAC", False),
+                patch.dict(os.environ, {"XDG_CONFIG_HOME": ""}),
                 patch.object(u, "which", return_value=None),
             ):
                 changed = u.wire_shells({"options": {"wire_homebrew": False}})
-                self.assertIn("~/.config/fish/conf.d/unienv.fish", changed)
-                self.assertIn("~/.config/nushell/env.nu", changed)
-                self.assertIn("~/.config/nushell/autoload/unienv.nu", changed)
+                self.assertIn(str(home / ".config/fish/conf.d/unienv.fish").replace(str(home), "~"), changed)
+                self.assertNotIn(str(home / ".config/nushell/env.nu").replace(str(home), "~"), changed)
+                self.assertIn(str(home / ".config/nushell/autoload/unienv.nu").replace(str(home), "~"), changed)
 
                 fish_conf = home / ".config/fish/conf.d/unienv.fish"
                 self.assertTrue(fish_conf.exists())
                 fish_text = fish_conf.read_text()
                 self.assertIn('fish_add_path -g "$UNIENV_HOME/bin"', fish_text)
-                self.assertIn("/private", fish_text)
+                self.assertIn("BASH_ENV", fish_text)
 
                 nu_env = home / ".config/nushell/env.nu"
                 nu_autoload = home / ".config/nushell/autoload/unienv.nu"
-                self.assertIsNotNone(u.read_block(nu_env, u.SHELL_BEGIN, u.SHELL_END))
+                self.assertIsNone(u.read_block(nu_env, u.SHELL_BEGIN, u.SHELL_END))
                 self.assertIsNotNone(u.read_block(nu_autoload, u.SHELL_BEGIN, u.SHELL_END))
 
                 # Re-running wire_shells is idempotent
@@ -65,6 +67,21 @@ class FishNushellTests(unittest.TestCase):
                 self.assertFalse(nu_autoload.exists())
                 self.assertIsNone(u.read_block(nu_env, u.SHELL_BEGIN, u.SHELL_END))
                 self.assertEqual(nu_env.read_text(), "# user nushell config\n")
+
+    def test_config_paths_respect_xdg_and_macos_nushell_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            xdg = home / "custom"
+            with (
+                patch.object(u, "HOME", home),
+                patch.object(u, "IS_MAC", True),
+                patch.object(u, "which", return_value=None),
+            ):
+                with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}):
+                    self.assertEqual(u._fish_conf_path(), xdg / "fish/conf.d/unienv.fish")
+                    self.assertEqual(u._nu_env_path(), xdg / "nushell/env.nu")
+                with patch.dict(os.environ, {"XDG_CONFIG_HOME": ""}):
+                    self.assertEqual(u._nu_config_dir(), home / "Library/Application Support/nushell")
 
     def test_doctor_probes_fish_when_installed(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:

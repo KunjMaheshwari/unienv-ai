@@ -503,11 +503,13 @@ def write_package_json(packages: list[str]) -> None:
     pj.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def install_node(packages: list[str]) -> None:
+def install_node(packages: list[str], *, require_npm: bool = False) -> None:
     if not packages:
         return
     npm = which("npm")
     if not npm:
+        if require_npm:
+            raise RuntimeError("npm not found: install Node.js (`unienv need --bin node`)")
         warn("npm not found; skipping Node batteries (install Node.js, then `unienv install`).")
         return
     write_package_json(packages)
@@ -706,6 +708,15 @@ def agent_targets() -> list[dict]:
             "instructions": HOME / ".config/opencode/AGENTS.md",
             "skills": None,
         },
+        {
+            # https://docs.windsurf.com/windsurf/cascade/memories#rules
+            "id": "windsurf",
+            "name": "Windsurf",
+            "detect": [HOME / ".codeium/windsurf"],
+            "bin": "windsurf",
+            "instructions": HOME / ".codeium/windsurf/memories/global_rules.md",
+            "skills": None,
+        },
     ]
 
 
@@ -734,16 +745,36 @@ def sync_agents(manifest: dict, recipes: list[dict], *, only_detected: bool = Tr
     return done
 
 
+def _config_home() -> Path:
+    raw = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    return Path(raw).expanduser() if raw else HOME / ".config"
+
+
 def _fish_conf_path() -> Path:
-    return HOME / ".config/fish/conf.d/unienv.fish"
+    return _config_home() / "fish/conf.d/unienv.fish"
+
+
+def _nu_config_dir() -> Path:
+    if os.environ.get("XDG_CONFIG_HOME", "").strip():
+        return _config_home() / "nushell"
+    nu = which("nu")
+    if nu:
+        try:
+            result = subprocess.run([nu, "-c", "$nu.default-config-dir"], capture_output=True, text=True, timeout=5)
+            path = Path(result.stdout.strip())
+            if result.returncode == 0 and path.is_absolute():
+                return path
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return HOME / "Library/Application Support/nushell" if IS_MAC else _config_home() / "nushell"
 
 
 def _nu_env_path() -> Path:
-    return HOME / ".config/nushell/env.nu"
+    return _nu_config_dir() / "env.nu"
 
 
 def _nu_autoload_path() -> Path:
-    return HOME / ".config/nushell/autoload/unienv.nu"
+    return _nu_config_dir() / "autoload/unienv.nu"
 
 
 def render_fish_conf(state: dict | None = None) -> str:
@@ -780,8 +811,8 @@ def render_nu_body(state: dict | None = None) -> str:
     lines = [f'$env.UNIENV_HOME = "{UNIENV_HOME}"']
     bp = brew_prefix()
     if opts.get("wire_homebrew", True) and bp:
-        lines.append(f'$env.PATH = ($env.PATH | split row (char esep) | prepend ["{bp}/bin" "{bp}/sbin"] | uniq)')
-    lines.append('$env.PATH = ($env.PATH | split row (char esep) | prepend $"($env.UNIENV_HOME)/bin" | uniq)')
+        lines.append(f'$env.PATH = ($env.PATH | prepend ["{bp}/bin" "{bp}/sbin"] | uniq)')
+    lines.append('$env.PATH = ($env.PATH | prepend $"($env.UNIENV_HOME)/bin" | uniq)')
     if IS_MAC:
         lines.append(
             'if ("TMPDIR" not-in $env) or ($env.TMPDIR | str starts-with "/tmp") { '
@@ -790,10 +821,42 @@ def render_nu_body(state: dict | None = None) -> str:
     return "\n".join(lines)
 
 
+def _zdotdir() -> Path | None:
+    raw = os.environ.get("ZDOTDIR", "").strip()
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    try:
+        same = p.resolve() == HOME.resolve()
+    except OSError:
+        same = p == HOME
+    return None if same else p
+
+
+def _shell_files() -> list[Path]:
+    if not SHELL_FILES:
+        return []
+    files = list(SHELL_FILES)
+    zdot = _zdotdir()
+    if zdot is not None:
+        zenv = zdot / ".zshenv"
+        if zenv not in files:
+            files.append(zenv)
+    state_path = UNIENV_HOME / "state.json"
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        state = {}
+    for raw in state.get("wired_shell_files", []):
+        if isinstance(raw, str) and Path(raw).is_absolute() and Path(raw) not in files:
+            files.append(Path(raw))
+    return files
+
+
 def wire_shells(state: dict | None = None) -> list[str]:
     body = f'[ -f "{ENV_SH}" ] && . "{ENV_SH}"'
     changed = []
-    for rc in SHELL_FILES:
+    for rc in _shell_files():
         # always wire zsh's .zshenv and the POSIX .profile; bash's own files only if they exist
         # (login bash reads .bash_profile or .bash_login *instead of* .profile when present)
         if rc.name not in (".zshenv", ".profile") and not rc.exists():
@@ -801,10 +864,18 @@ def wire_shells(state: dict | None = None) -> list[str]:
         try:
             if upsert_block(rc, body, SHELL_BEGIN, SHELL_END):
                 changed.append(str(rc).replace(str(HOME), "~"))
+            if rc.name == ".zshenv" and rc.resolve().parent != HOME.resolve():
+                state_path = UNIENV_HOME / "state.json"
+                state = json.loads(state_path.read_text()) if state_path.exists() else {}
+                paths = state.setdefault("wired_shell_files", [])
+                saved = str(rc.resolve())
+                if saved not in paths:
+                    paths.append(saved)
+                    state_path.parent.mkdir(parents=True, exist_ok=True)
+                    atomic_write(state_path, json.dumps(state, indent=2) + "\n")
         except OSError as e:
             warn(f"could not update {rc} ({e}); add `source {ENV_SH}` yourself")
-    allow_bin_detect = any(p.name == ".bashrc" for p in SHELL_FILES)
-    if (HOME / ".config/fish").exists() or (allow_bin_detect and which("fish")):
+    if _fish_conf_path().parent.parent.exists() or which("fish"):
         fish_conf = _fish_conf_path()
         fish_text = render_fish_conf(state)
         try:
@@ -815,9 +886,11 @@ def wire_shells(state: dict | None = None) -> list[str]:
                 changed.append(str(fish_conf).replace(str(HOME), "~"))
         except OSError as e:
             warn(f"could not update {fish_conf} ({e})")
-    if (HOME / ".config/nushell").exists() or (allow_bin_detect and which("nu")):
+    if _nu_config_dir().exists() or which("nu"):
         nu_body = render_nu_body(state)
-        for nu_path in (_nu_env_path(), _nu_autoload_path()):
+        if _nu_env_path().exists():
+            remove_block(_nu_env_path(), SHELL_BEGIN, SHELL_END)
+        for nu_path in (_nu_autoload_path(),):
             try:
                 if upsert_block(nu_path, nu_body, SHELL_BEGIN, SHELL_END):
                     changed.append(str(nu_path).replace(str(HOME), "~"))
@@ -993,7 +1066,7 @@ def cmd_need(args) -> int:
         if kind == "python":
             install_python(w["python"])
         elif kind == "node":
-            install_node(w["node"])
+            install_node(w["node"], require_npm=True)
         else:
             failed = install_system(
                 {
@@ -1023,6 +1096,154 @@ def cmd_need(args) -> int:
     log_event(event="need", kind=kind, packages=new, curated=not uncurated)
     via = {"python": "ue-py", "node": "ue-node"}.get(kind, "PATH")
     info(f"✓ installed {', '.join(new)}; available to every AI tool via {via}")
+    return 0
+
+
+def _verify_python_imports(recipes: list[dict]) -> dict[str, str]:
+    """Verify battery Python imports. Returns a dict of {module: error_string} for failures."""
+    imports = uniq([m for r in recipes for m in r.get("python", {}).get("imports", [])])
+    if not imports:
+        return {}
+    py = PY_DIR / ".venv/bin/python"
+    if not py.exists():
+        return {"python": "shared Python env missing"}
+    code = (
+        "import importlib, json\nbad = {}\n"
+        f"for m in {imports!r}:\n"
+        "    try: importlib.import_module(m)\n"
+        "    except Exception as e: bad[m] = f'{type(e).__name__}: {e}'[:120]\n"
+        "print(json.dumps(bad))"
+    )
+    r = run([str(py), "-P", "-c", code], capture=True, check=False, timeout=120)
+    if r.returncode != 0:
+        return {"python": (r.stderr or r.stdout or "import check failed").strip()[:200]}
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return {"python": "could not parse import check output"}
+
+
+def cmd_upgrade(args) -> int:
+    recipes_all = load_recipes()
+    state = load_state(recipes_all)
+    recipes = active_recipes(recipes_all, state)
+    w = wanted(recipes, state)
+    pkgs = args.packages or []
+    do_py = not args.node
+    do_node = bool(args.node) or (not pkgs and bool(w["node"]))
+
+    if args.dry_run:
+        if do_py and (PY_DIR / "pyproject.toml").exists():
+            uv = find_uv()
+            uv_cmd = [uv, "lock", "--project", str(PY_DIR), "--managed-python", "--dry-run"]
+            if pkgs:
+                for p in pkgs:
+                    uv_cmd.extend(["--upgrade-package", py_name(p)])
+            else:
+                uv_cmd.append("--upgrade")
+            r = run(uv_cmd, capture=True, check=False, env={"UV_PROJECT_ENVIRONMENT": str(PY_DIR / ".venv")})
+            out = ((r.stdout or "") + (r.stderr or "")).strip()
+            info(out or "Python packages: all up to date")
+        if do_node and (NODE_DIR / "package.json").exists():
+            npm = which("npm")
+            if npm:
+                r = run([npm, "outdated", *pkgs], cwd=NODE_DIR, capture=True, check=False)
+                out = (r.stdout or "").strip()
+                info(out or "Node packages: all up to date")
+        return 0
+
+    before_py = python_packages() if do_py else {}
+    before_node = node_packages(w["node"]) if do_node else {}
+
+    tracked = [
+        STATE_FILE,
+        PY_DIR / "pyproject.toml",
+        PY_DIR / "uv.lock",
+        NODE_DIR / "package.json",
+        NODE_DIR / "package-lock.json",
+    ]
+    existed = {f: f.exists() for f in tracked}
+    snap = BACKUP_DIR / _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    snap.mkdir(parents=True, exist_ok=True)
+    for f in tracked:
+        if existed[f]:
+            shutil.copy2(f, snap / f"{f.parent.name}__{f.name}")
+
+    try:
+        if do_py:
+            uv = find_uv()
+            write_pyproject(w["python"])
+            uv_cmd = [uv, "lock", "--project", str(PY_DIR), "--managed-python"]
+            if pkgs:
+                for p in pkgs:
+                    uv_cmd.extend(["--upgrade-package", py_name(p)])
+            else:
+                uv_cmd.append("--upgrade")
+            run(uv_cmd, env={"UV_PROJECT_ENVIRONMENT": str(PY_DIR / ".venv")})
+            install_python(w["python"])
+            bad_imports = _verify_python_imports(recipes)
+            if bad_imports:
+                details = "; ".join(f"{m}: {err}" for m, err in bad_imports.items())
+                raise RuntimeError(f"import check failed after upgrade ({details})")
+        if do_node and w["node"]:
+            npm = which("npm")
+            if not npm:
+                if args.node:
+                    raise RuntimeError("npm not found")
+                warn("npm not found; skipping Node upgrade")
+            else:
+                if not (NODE_DIR / "package.json").exists():
+                    write_package_json(w["node"])
+                run(
+                    [
+                        npm,
+                        "update",
+                        "--save",
+                        "--no-audit",
+                        "--no-fund",
+                        "--loglevel=error",
+                        "--progress=false",
+                        "--no-update-notifier",
+                        *pkgs,
+                    ],
+                    cwd=NODE_DIR,
+                )
+    except (subprocess.CalledProcessError, RuntimeError, SystemExit) as e:
+        warn(f"upgrade failed ({e}); rolling back")
+        for f in tracked:
+            if existed[f]:
+                shutil.copy2(snap / f"{f.parent.name}__{f.name}", f)
+            elif f.exists():
+                f.unlink()
+        state = load_state(recipes_all)
+        try:
+            if do_py and existed[PY_DIR / "pyproject.toml"]:
+                install_python(wanted(recipes, state)["python"])
+            if do_node and existed[NODE_DIR / "package.json"]:
+                install_node(wanted(recipes, state)["node"])
+        except (subprocess.CalledProcessError, RuntimeError, SystemExit) as re_err:
+            warn(f"rollback re-install failed ({re_err}); run unienv install to repair")
+        log_event(event="upgrade-failed", packages=pkgs, node=bool(args.node))
+        return 1
+
+    after_py = python_packages() if do_py else {}
+    after_node = node_packages(w["node"]) if do_node else {}
+    changes = []
+    for k in sorted(set(before_py) | set(after_py)):
+        b, a = before_py.get(k), after_py.get(k)
+        if b != a and a is not None:
+            changes.append(f"{k} {b or '(new)'} -> {a}")
+    for k in sorted(set(before_node) | set(after_node)):
+        b, a = before_node.get(k), after_node.get(k)
+        if b != a and a is not None:
+            changes.append(f"node:{k} {b or '(new)'} -> {a}")
+
+    do_sync(state, recipes_all, quiet=True)
+    log_event(event="upgrade", packages=pkgs, changes=changes)
+    if changes:
+        info("✓ upgraded: " + ", ".join(changes))
+    else:
+        info("✓ all packages already at latest compatible versions")
     return 0
 
 
@@ -1082,7 +1303,7 @@ def cmd_status(args) -> int:
     return 0
 
 
-REPO_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/archive/refs/heads/{ref}.tar.gz"
+REPO_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/archive/{ref}.tar.gz"
 
 
 # ── MCP server for desktop apps ─────────────────────────────────────────────
@@ -1207,6 +1428,7 @@ def cmd_update(args) -> int:
     """Download the latest UniEnv, replace ~/.unienv/share, then re-run install with the new code."""
     import tarfile
     import tempfile
+    import urllib.error
     import urllib.request
 
     share = UNIENV_HOME / "share"
@@ -1216,7 +1438,11 @@ def cmd_update(args) -> int:
     step(f"Downloading {url}")
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "unienv.tar.gz"
-        urllib.request.urlretrieve(url, archive)
+        try:
+            with urllib.request.urlopen(url) as resp, archive.open("wb") as out:
+                shutil.copyfileobj(resp, out)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+            die(f"could not download UniEnv ref {args.ref!r} ({e}); check the branch or tag name")
         with tarfile.open(archive) as tar:
             tar.extractall(tmp, filter="data")
         src = next(Path(tmp).glob("unienv-ai-*"))
@@ -1235,7 +1461,7 @@ def cmd_update(args) -> int:
 # ── doctor ──────────────────────────────────────────────────────────────────
 
 
-def _clean_shell_probe(argv: list[str]) -> str | None:
+def _clean_shell_probe(argv: list[str], *, extra_env: dict[str, str] | None = None) -> str | None:
     """Run `command -v ue-py` in a shell started from a near-empty environment, like an agent or GUI app."""
     env = {
         "HOME": str(HOME),
@@ -1245,6 +1471,8 @@ def _clean_shell_probe(argv: list[str]) -> str | None:
     }
     if "UNIENV_HOME" in os.environ:
         env["UNIENV_HOME"] = os.environ["UNIENV_HOME"]
+    if extra_env:
+        env.update(extra_env)
     try:
         r = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -1322,17 +1550,20 @@ def cmd_doctor(args) -> int:
     # Shell wiring: what agents and GUI apps actually see
     target = str(BIN / "ue-py")
     probes = [
-        ("zsh -c", ["/bin/zsh", "-c", "command -v ue-py"]),
-        ("zsh -lc", ["/bin/zsh", "-lc", "command -v ue-py"]),
-        ("bash -lc", ["/bin/bash", "-lc", "command -v ue-py"]),
+        ("zsh -c", ["/bin/zsh", "-c", "command -v ue-py"], None),
+        ("zsh -lc", ["/bin/zsh", "-lc", "command -v ue-py"], None),
+        ("bash -lc", ["/bin/bash", "-lc", "command -v ue-py"], None),
     ]
     fish_bin = which("fish")
     if fish_bin:
-        probes.append(("fish -c", [fish_bin, "-c", "command -v ue-py"]))
-    for label, argv in probes:
+        probes.append(("fish -c", [fish_bin, "-c", "command -v ue-py"], None))
+    zdot = _zdotdir()
+    if zdot is not None:
+        probes.append(("ZDOTDIR zsh -c", ["/bin/zsh", "-c", "command -v ue-py"], {"ZDOTDIR": str(zdot)}))
+    for label, argv, extra_env in probes:
         if not Path(argv[0]).exists():
             continue
-        got = _clean_shell_probe(argv)
+        got = _clean_shell_probe(argv) if extra_env is None else _clean_shell_probe(argv, extra_env=extra_env)
         if got == target:
             add(f"shell:{label}", "ok", f"`{label}` finds ue-py")
         else:
@@ -1566,7 +1797,7 @@ def cmd_wire(args) -> int:
 
 
 def cmd_uninstall(args) -> int:
-    for rc in SHELL_FILES:
+    for rc in _shell_files():
         try:
             if remove_block(rc, SHELL_BEGIN, SHELL_END):
                 info(f"  removed block from {rc}")
@@ -1663,6 +1894,12 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.add_argument("-y", "--yes", action="store_true")
     s.set_defaults(fn=cmd_need)
 
+    s = sub.add_parser("upgrade", help="upgrade installed Python and Node packages with automatic rollback")
+    s.add_argument("packages", nargs="*", help="specific packages to upgrade (default: all)")
+    s.add_argument("--node", action="store_true", help="upgrade Node packages")
+    s.add_argument("--dry-run", action="store_true", help="show what would be upgraded without changing anything")
+    s.set_defaults(fn=cmd_upgrade)
+
     s = sub.add_parser("doctor", help="verify tools, shell wiring, agent files and secrets hygiene")
     s.add_argument("--json", action="store_true", help="machine-readable output for agents and CI")
     s.add_argument("--fix", action="store_true", help="apply safe fixes (regenerate wiring), then re-check")
@@ -1707,7 +1944,11 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.set_defaults(fn=lambda a: print(BIN) or 0)
 
     args = p.parse_args(argv)
-    mutating = args.cmd in ("install", "need", "sync", "uninstall") or (args.cmd == "doctor" and args.fix)
+    mutating = (
+        args.cmd in ("install", "need", "sync", "uninstall")
+        or (args.cmd == "upgrade" and not args.dry_run)
+        or (args.cmd == "doctor" and args.fix)
+    )
     try:
         with state_lock() if mutating else contextlib.nullcontext():
             return args.fn(args)

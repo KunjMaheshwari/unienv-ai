@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
 
 jobs:
   lint:
@@ -51,6 +54,12 @@ jobs:
           bash -n install.sh
           for f in tests/smoke.sh shims/*; do sh -n "$f"; done
 
+      - name: Install LibreOffice for CSV regression tests (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-calc libreoffice-writer
+
       - name: Unit tests
         run: python3 -m unittest discover -s tests/unit -v
 
@@ -61,7 +70,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pandoc poppler-utils qpdf ghostscript tesseract-ocr jq ripgrep
+          sudo apt-get install -y pandoc poppler-utils qpdf ghostscript tesseract-ocr jq ripgrep fish
 
       - name: Install (macOS without LibreOffice to keep CI fast)
         if: runner.os == 'macOS'
@@ -72,6 +81,11 @@ jobs:
       - name: Install (Linux)
         if: runner.os == 'Linux'
         run: ./install.sh --no-system --exclude libreoffice
+
+      - name: Fish non-interactive PATH (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          test "$(env -i HOME="$HOME" USER="$USER" PATH=/usr/bin:/bin fish -c 'command -v ue-py')" = "$HOME/.unienv/bin/ue-py"
 
       - name: Doctor
         run: |
@@ -99,3 +113,25 @@ jobs:
           jq -e '.extras.python | index("tomli-w") and index("six")' ~/.unienv/state.json
           ! ~/.unienv/bin/unienv need this-package-does-not-exist-unienv-ci
           ~/.unienv/bin/unienv doctor
+
+  libreoffice:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system packages including LibreOffice
+        run: |
+          brew install pandoc poppler qpdf ghostscript tesseract duckdb jq ripgrep
+          brew install --cask libreoffice
+          ./install.sh --no-system
+
+      - name: Doctor with LibreOffice enabled
+        run: ~/.unienv/bin/unienv doctor
+
+      - name: Smoke test with LibreOffice conversions
+        run: env -i HOME="$HOME" USER="$USER" PATH=/usr/bin:/bin bash -lc tests/smoke.sh
+
+      - name: MCP server end-to-end with LibreOffice conversions
+        run: python3 tests/mcp_test.py
