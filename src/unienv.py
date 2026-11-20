@@ -280,7 +280,9 @@ def atomic_write(path: Path, text: str) -> None:
 def state_lock():
     """Serialise commands that change ~/.unienv: parallel agents often run `unienv need` at once."""
     UNIENV_HOME.mkdir(parents=True, exist_ok=True)
-    with open(UNIENV_HOME / ".lock", "a+b") as f:
+    # Keep the lock outside the install tree so Windows can purge it while locked.
+    lock_path = UNIENV_HOME.parent / ("." + UNIENV_HOME.name + ".lock")
+    with open(lock_path, "a+b") as f:
         if IS_WIN:
             import msvcrt
 
