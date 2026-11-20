@@ -2,13 +2,13 @@
 
 import argparse
 import contextlib
-import hashlib
 import importlib.util
 import io
 import os
 import pathlib
 import tempfile
 import tomllib
+import json
 import unittest
 from unittest.mock import patch
 
@@ -27,6 +27,8 @@ class ExportImportTests(unittest.TestCase):
         stack.enter_context(patch.object(u, "NODE_DIR", root / "node"))
         stack.enter_context(patch.object(u, "STATE_FILE", root / "state.json"))
         stack.enter_context(patch.object(u, "LOG_FILE", root / "log" / "unienv.log"))
+        stack.enter_context(patch.object(u, "BACKUP_DIR", root / "backups"))
+        stack.enter_context(patch.object(u, "cmd_doctor", return_value=0))
         return root
 
     def test_round_trip_export_and_import(self):
@@ -63,8 +65,7 @@ class ExportImportTests(unittest.TestCase):
             self.assertEqual(doc["extras"]["python"], ["seaborn>=0.13"])
             self.assertEqual(doc["extras"]["node"], ["chart.js@4.4.0"])
             self.assertEqual(doc["extras"]["brew"], ["jq"])
-            self.assertEqual(doc["locks"]["uv_lock_sha256"], hashlib.sha256(b"uv-lock-content\n").hexdigest())
-            self.assertEqual(doc["locks"]["package_lock_sha256"], hashlib.sha256(b"npm-lock-content\n").hexdigest())
+            self.assertNotIn("locks", doc)
 
             with contextlib.ExitStack() as stack2:
                 root2 = self._setup_home(stack2, tmp2)
@@ -84,7 +85,7 @@ class ExportImportTests(unittest.TestCase):
 
                 with contextlib.redirect_stdout(io.StringIO()):
                     rc_imp = u.cmd_import(
-                        argparse.Namespace(file=str(env_file), no_system=False, no_wire=True, yes=False)
+                        argparse.Namespace(file=str(env_file), no_system=False, no_wire=True, yes=True)
                     )
                 self.assertEqual(rc_imp, 0)
 
@@ -117,6 +118,71 @@ class ExportImportTests(unittest.TestCase):
             self.assertNotIn("sk-secret-token-12345", text)
             self.assertNotIn("OPENAI_API_KEY", text)
 
+    def test_unsafe_specs_rejected_before_install(self):
+        for kind, value in (
+            ("apt", "-oAPT::Update::Pre-Invoke::=evil"),
+            ("python", "https://example.invalid/x.whl"),
+            ("node", "--ignore-scripts"),
+            ("brew", "../outside"),
+        ):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+                root = self._setup_home(stack, tmp)
+                file = root / "import.toml"
+                file.write_text('schema="unienv/env/v0"\nbatteries=[]\n[extras]\n' + kind + "=" + json.dumps([value]))
+                install = stack.enter_context(patch.object(u, "cmd_install"))
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    u.cmd_import(argparse.Namespace(file=str(file), yes=True, no_system=True, no_wire=True))
+                install.assert_not_called()
+                self.assertFalse(u.STATE_FILE.exists())
+
+    def test_declined_import_leaves_state_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+            root = self._setup_home(stack, tmp)
+            file = root / "import.toml"
+            file.write_text('schema="unienv/env/v0"\nbatteries=[]\n')
+            install = stack.enter_context(patch.object(u, "cmd_install"))
+            stack.enter_context(patch("builtins.input", return_value="n"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    u.cmd_import(argparse.Namespace(file=str(file), yes=False, no_system=True, no_wire=True)), 1
+                )
+            install.assert_not_called()
+            self.assertFalse(u.STATE_FILE.exists())
+
+    def test_failures_and_interrupts_restore_state_and_project_files(self):
+        for failure in (RuntimeError("failed"), KeyboardInterrupt(), SystemExit(2)):
+            with (
+                self.subTest(failure=type(failure).__name__),
+                tempfile.TemporaryDirectory() as tmp,
+                contextlib.ExitStack() as stack,
+            ):
+                root = self._setup_home(stack, tmp)
+                file = root / "import.toml"
+                file.write_text('schema="unienv/env/v0"\nbatteries=[]\n[extras]\npython=["bad-pkg"]\n')
+                u.save_state(u.default_state(u.load_recipes()))
+                initial = u.STATE_FILE.read_bytes()
+                u.PY_DIR.mkdir()
+                project = u.PY_DIR / "pyproject.toml"
+                project.write_bytes(b"original\n")
+
+                def fail(args):
+                    project.write_bytes(b"changed")
+                    (u.PY_DIR / ".venv").mkdir()
+                    (u.PY_DIR / ".python-version").write_text("changed")
+                    raise failure
+
+                stack.enter_context(patch.object(u, "cmd_install", side_effect=fail))
+                stack.enter_context(patch.object(u, "install_python"))
+                stack.enter_context(patch.object(u, "do_sync"))
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(
+                        u.cmd_import(argparse.Namespace(file=str(file), yes=True, no_system=True, no_wire=True)), 1
+                    )
+                self.assertEqual(u.STATE_FILE.read_bytes(), initial)
+                self.assertEqual(project.read_bytes(), b"original\n")
+                self.assertFalse((u.PY_DIR / ".venv").exists())
+                self.assertFalse((u.PY_DIR / ".python-version").exists())
+
     def test_import_from_stdin_and_validation_errors(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
             self._setup_home(stack, tmp)
@@ -130,7 +196,7 @@ class ExportImportTests(unittest.TestCase):
             )
             stack.enter_context(patch.object(u.sys, "stdin", io.StringIO(valid_toml)))
             with contextlib.redirect_stdout(io.StringIO()):
-                rc = u.cmd_import(argparse.Namespace(file="-", no_system=True, no_wire=True, yes=False))
+                rc = u.cmd_import(argparse.Namespace(file="-", no_system=True, no_wire=True, yes=True))
             self.assertEqual(rc, 0)
             self.assertEqual(u.load_state(u.load_recipes())["extras"]["python"], ["httpx"])
 
@@ -138,7 +204,7 @@ class ExportImportTests(unittest.TestCase):
             stack.enter_context(patch.object(u.sys, "stdin", io.StringIO(bad_toml)))
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 with self.assertRaises(SystemExit):
-                    u.cmd_import(argparse.Namespace(file="-", no_system=True, no_wire=True, yes=False))
+                    u.cmd_import(argparse.Namespace(file="-", no_system=True, no_wire=True, yes=True))
             self.assertIn("invalid environment file", err.getvalue())
 
 
