@@ -65,6 +65,20 @@ class UninstallRestoreExactTests(unittest.TestCase):
                         self.assertEqual(p.read_bytes(), expected)
                 self.assertFalse((claude_dir / "skills" / "unienv").exists())
 
+    def test_repeated_sync_preserves_layout_for_shell_and_markdown_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "rules"
+            for begin, end in ((u.SHELL_BEGIN, u.SHELL_END), (u.MD_BEGIN, u.MD_END)):
+                for raw in (b"", b"hello", b"hello\n", b"\nhello\n\n", b"hello\r\n", b"hello\r\n\r\n"):
+                    for top in (False, True):
+                        with self.subTest(raw=raw, top=top, begin=begin):
+                            path.write_bytes(raw)
+                            u.upsert_block(path, "first", begin, end, top=top)
+                            u.upsert_block(path, "second", begin, end, top=top)
+                            self.assertEqual(u.read_block(path, begin, end), "second")
+                            self.assertTrue(u.remove_block(path, begin, end))
+                            self.assertEqual(path.read_bytes(), raw)
+
     def test_file_without_trailing_newline_preserves_content_after_uninstall(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = pathlib.Path(tmp)
@@ -83,7 +97,7 @@ class UninstallRestoreExactTests(unittest.TestCase):
                 u.wire_shells()
                 self.assertIsNotNone(u.read_block(zshenv, u.SHELL_BEGIN, u.SHELL_END))
                 u.cmd_uninstall(argparse.Namespace(purge=False))
-                self.assertEqual(zshenv.read_text().strip(), "export NO_TRAILING_NL=1")
+                self.assertEqual(zshenv.read_bytes(), b"export NO_TRAILING_NL=1")
                 self.assertIsNone(u.read_block(zshenv, u.SHELL_BEGIN, u.SHELL_END))
 
 

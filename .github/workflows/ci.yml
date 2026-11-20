@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
 
 jobs:
   lint:
@@ -50,6 +53,12 @@ jobs:
           python3 -m py_compile src/unienv.py
           bash -n install.sh
           for f in tests/smoke.sh shims/*; do sh -n "$f"; done
+
+      - name: Install LibreOffice for CSV regression tests (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-calc libreoffice-writer
 
       - name: Unit tests
         run: python3 -m unittest discover -s tests/unit -v
@@ -105,7 +114,7 @@ jobs:
           ~/.unienv/bin/unienv uninstall
           mkdir -p ~/.claude
           printf 'export ZSH_USER_VAR=1\nalias ll="ls -l"\n' > ~/.zshenv
-          printf 'export PROFILE_VAR=1\n' > ~/.profile
+          printf 'export PROFILE_VAR=1' > ~/.profile
           printf 'export BASHRC_VAR=1\n' > ~/.bashrc
           printf '# My Claude instructions\nAlways run tests.\n' > ~/.claude/CLAUDE.md
           cp ~/.zshenv ~/.zshenv.expected
@@ -113,7 +122,7 @@ jobs:
           cp ~/.bashrc ~/.bashrc.expected
           cp ~/.claude/CLAUDE.md ~/.claude/CLAUDE.md.expected
 
-          REF="${GITHUB_HEAD_REF:-main}"
+          REF="${{ github.event.pull_request.head.sha || github.sha }}"
           cat install.sh | UNIENV_REF="$REF" bash -s -- --no-system --exclude libreoffice
           ~/.unienv/bin/unienv update --ref "$REF"
           ~/.unienv/bin/unienv doctor
@@ -123,3 +132,24 @@ jobs:
           cmp -s ~/.profile ~/.profile.expected
           cmp -s ~/.bashrc ~/.bashrc.expected
           cmp -s ~/.claude/CLAUDE.md ~/.claude/CLAUDE.md.expected
+  libreoffice:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system packages including LibreOffice
+        run: |
+          brew install pandoc poppler qpdf ghostscript tesseract duckdb jq ripgrep
+          brew install --cask libreoffice
+          ./install.sh --no-system
+
+      - name: Doctor with LibreOffice enabled
+        run: ~/.unienv/bin/unienv doctor
+
+      - name: Smoke test with LibreOffice conversions
+        run: env -i HOME="$HOME" USER="$USER" PATH=/usr/bin:/bin bash -lc tests/smoke.sh
+
+      - name: MCP server end-to-end with LibreOffice conversions
+        run: python3 tests/mcp_test.py
