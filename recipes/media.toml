@@ -16,6 +16,12 @@ apt = ["ffmpeg", "imagemagick"]
 winget = ["Gyan.FFmpeg", "ImageMagick.ImageMagick"]
 scoop = ["ffmpeg", "imagemagick"]
 
+[system.fedora]
+dnf = ["ffmpeg-free", "ImageMagick"]
+
+[system.arch]
+pacman = ["ffmpeg", "imagemagick"]
+
 [verify]
 bins = ["ffmpeg", "magick"]
 

@@ -20,6 +20,12 @@ apt = ["poppler-utils", "qpdf", "ghostscript"]
 winget = ["oschwartz10612.Poppler", "qpdf.qpdf", "ArtifexSoftware.GhostScript"]
 scoop = ["poppler", "qpdf", "ghostscript"]
 
+[system.fedora]
+dnf = ["poppler-utils", "qpdf", "ghostscript"]
+
+[system.arch]
+pacman = ["poppler", "qpdf", "ghostscript"]
+
 [verify]
 bins = ["pdftotext", "pdftoppm", "qpdf", "gs"]
 

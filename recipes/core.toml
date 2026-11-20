@@ -15,6 +15,12 @@ apt = ["nodejs", "npm", "ripgrep", "jq"]
 winget = ["astral-sh.uv", "OpenJS.NodeJS.LTS", "BurntSushi.ripgrep.MSVC", "jqlang.jq"]
 scoop = ["uv", "nodejs-lts", "ripgrep", "jq"]
 
+[system.fedora]
+dnf = ["nodejs", "npm", "ripgrep", "jq"]
+
+[system.arch]
+pacman = ["nodejs", "npm", "ripgrep", "jq"]
+
 [verify]
 bins = ["uv", "node", "rg", "jq"]
 

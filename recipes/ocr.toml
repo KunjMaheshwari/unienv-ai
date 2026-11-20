@@ -20,6 +20,12 @@ apt = ["tesseract-ocr"]
 winget = ["UB-Mannheim.TesseractOCR"]
 scoop = ["tesseract"]
 
+[system.fedora]
+dnf = ["tesseract"]
+
+[system.arch]
+pacman = ["tesseract", "tesseract-data-eng"]
+
 [verify]
 bins = ["tesseract"]
 

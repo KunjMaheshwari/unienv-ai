@@ -16,6 +16,12 @@ apt = ["fonts-crosextra-carlito", "fonts-crosextra-caladea", "fonts-liberation2"
 winget = []
 scoop = []
 
+[system.fedora]
+dnf = ["google-carlito-fonts", "sil-caladea-fonts", "liberation-fonts", "google-noto-sans-cjk-fonts"]
+
+[system.arch]
+pacman = ["ttf-carlito", "ttf-caladea", "ttf-liberation", "noto-fonts-cjk"]
+
 [verify]
 bins = []
 
