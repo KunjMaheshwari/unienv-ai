@@ -1,7 +1,7 @@
 #:schema ../schema/recipe.schema.json
 schema = "unienv/recipe/v0"
 id = "speech"
-summary = "Transcribe audio and video locally with faster-whisper and ffmpeg (opt-in)"
+summary = "Local audio/video transcription (opt-in; Python dependencies measured 468 MiB on Linux x86_64; model weights extra)"
 default = false
 maintainers = ["github:rupeshbharambe24", "github:KunjMaheshwari"]
 license_note = "faster-whisper MIT; CTranslate2 MIT; ffmpeg LGPL/GPL"
@@ -21,6 +21,7 @@ bins = ["ffmpeg"]
 
 [agent]
 notes = """
+- Linux x86_64 measurement on 2026-11-20: faster-whisper 1.2.1 plus Python dependencies occupied 468 MiB. This excludes system ffmpeg and separately downloaded model weights; versions/platforms change the footprint.
 - Local audio/video transcription via `ue-py` with `faster-whisper` (CTranslate2 backend, no PyTorch required).
 - Default to the `small` model with `compute_type="int8"` on CPU, and share the model cache under `~/.unienv/cache/hf`:
   `import os; from faster_whisper import WhisperModel; model = WhisperModel("small", device="cpu", compute_type="int8", download_root=os.path.expanduser("~/.unienv/cache/hf"))`
