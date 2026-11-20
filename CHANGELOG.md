@@ -4,11 +4,9 @@ All notable changes to UniEnv AI are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
-### Added
-- Fish and Nushell environment wiring with XDG/macOS config paths, a single Nushell autoload file, and a real Linux non-interactive fish PATH check. (#29)
-
 ### Fixed
-- Wire custom ZDOTDIR zsh startup files and remember them for uninstall from other shells. (#23)
+- Remove stale generated shims on the first upgrade, preserve user files, and prune old backups once per sync or package addition. (#38)
+
 ### Security
 - Add MCP readonly and folder restrictions, disable arbitrary execution under roots, protect dangling output symlinks, sandbox Pandoc conversions, and expose policy settings in the Desktop extension. (#33)
 
