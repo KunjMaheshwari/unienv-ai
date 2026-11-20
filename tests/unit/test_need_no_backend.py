@@ -29,20 +29,29 @@ class NeedNoBackendTest(unittest.TestCase):
         self.assertIn("No system package backend for linux yet", err.getvalue())
         self.assertIn("ffmpeg", err.getvalue())
 
-    def test_install_system_falls_back_to_bins_or_sentinel(self):
+    def test_installed_bins_and_empty_requirements_are_not_failures(self):
         w_bins = {"brew": [], "cask": [], "apt": [], "bins": ["jq"]}
         with (
             mock.patch.object(unienv, "platform_key", return_value="freebsd"),
             contextlib.redirect_stderr(io.StringIO()),
         ):
-            self.assertEqual(unienv.install_system(w_bins, assume_yes=False), ["freebsd:jq"])
+            self.assertEqual(unienv.install_system(w_bins, assume_yes=False), [])
 
         w_empty = {"brew": [], "cask": [], "apt": [], "bins": []}
         with (
             mock.patch.object(unienv, "platform_key", return_value="freebsd"),
             contextlib.redirect_stderr(io.StringIO()),
         ):
-            self.assertEqual(unienv.install_system(w_empty, assume_yes=False), ["unsupported-platform"])
+            self.assertEqual(unienv.install_system(w_empty, assume_yes=False), [])
+
+    def test_all_requested_package_types_are_reported_without_shim_names(self):
+        w = {"brew": ["ffmpeg"], "cask": ["libreoffice"], "apt": ["pandoc"], "bins": ["soffice-safe"]}
+        err = io.StringIO()
+        with mock.patch.object(unienv, "platform_key", return_value="linux"), contextlib.redirect_stderr(err):
+            self.assertEqual(
+                unienv.install_system(w, assume_yes=False), ["linux:ffmpeg", "linux:libreoffice", "linux:pandoc"]
+            )
+        self.assertNotIn("soffice-safe", err.getvalue())
 
     def test_cmd_need_bin_on_unsupported_platform_exits_nonzero_and_leaves_state_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:
