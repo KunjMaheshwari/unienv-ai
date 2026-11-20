@@ -13,7 +13,7 @@ brew = ["ffmpeg", "imagemagick"]
 apt = ["ffmpeg", "imagemagick"]
 
 [system.fedora]
-dnf = ["ffmpeg", "ImageMagick"]
+dnf = ["ffmpeg-free", "ImageMagick"]
 
 [system.arch]
 pacman = ["ffmpeg", "imagemagick"]

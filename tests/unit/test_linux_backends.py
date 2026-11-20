@@ -31,7 +31,7 @@ class LinuxPlatformKeyTest(unittest.TestCase):
             ):
                 self.assertEqual(unienv.platform_key(), "fedora")
 
-    def test_detects_rhel_like_as_fedora(self):
+    def test_rhel_clones_do_not_use_fedora_packages_without_epel(self):
         with tempfile.TemporaryDirectory() as tmp:
             os_rel = Path(tmp) / "os-release"
             os_rel.write_text('ID="rocky"\nID_LIKE="rhel centos fedora"\n')
@@ -40,7 +40,7 @@ class LinuxPlatformKeyTest(unittest.TestCase):
                 mock.patch.object(unienv, "_os_release_tokens", return_value=unienv._os_release_tokens(os_rel)),
                 mock.patch.object(Path, "exists", return_value=False),
             ):
-                self.assertEqual(unienv.platform_key(), "fedora")
+                self.assertEqual(unienv.platform_key(), sys.platform)
 
     def test_detects_arch_via_os_release(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,6 +157,31 @@ class LinuxInstallSystemTest(unittest.TestCase):
             failures = unienv.install_system(w, assume_yes=False)
         self.assertEqual(failures, ["dnf:ripgrep"])
         self.assertIn("sudo dnf install -y ripgrep", err.getvalue())
+
+    def test_dnf_retries_individual_packages_and_reports_only_failed_packages(self):
+        calls = []
+
+        def run(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[0] == "rpm":
+                return _result(cmd, code=1)
+            return _result(cmd, code=1 if "missing" in cmd else 0)
+
+        with (
+            mock.patch.object(unienv, "platform_key", return_value="fedora"),
+            mock.patch.object(unienv, "run", side_effect=run),
+            mock.patch.object(unienv.os, "geteuid", return_value=0, create=True),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            failures = unienv.install_system({"dnf": ["missing", "jq"], "bins": []}, assume_yes=True)
+        self.assertEqual(failures, ["dnf:missing"])
+        self.assertIn(["dnf", "install", "-y", "missing"], calls)
+        self.assertIn(["dnf", "install", "-y", "jq"], calls)
+
+    def test_media_recipe_uses_stock_fedora_ffmpeg(self):
+        media = unienv.load_recipes()["media"]
+        self.assertIn("ffmpeg-free", media["system"]["fedora"]["dnf"])
+        self.assertNotIn("ffmpeg", media["system"]["fedora"]["dnf"])
 
     def test_arch_pacman_install_as_root(self):
         cmds = []
