@@ -34,7 +34,7 @@ class ZdotdirTests(unittest.TestCase):
                 patch.object(u, "SHELL_FILES", shell_files),
             ):
                 changed = u.wire_shells()
-                self.assertIn("~/.config/zsh/.zshenv", changed)
+                self.assertIn(str(zdot / ".zshenv").replace(str(home), "~"), changed)
                 self.assertIsNotNone(u.read_block(zdot / ".zshenv", u.SHELL_BEGIN, u.SHELL_END))
                 self.assertIsNotNone(u.read_block(home / ".zshenv", u.SHELL_BEGIN, u.SHELL_END))
                 saved = json.loads((unienv_home / "state.json").read_text())

@@ -795,6 +795,7 @@ def wire_shells() -> list[str]:
                 saved = str(rc.resolve())
                 if saved not in paths:
                     paths.append(saved)
+                    state_path.parent.mkdir(parents=True, exist_ok=True)
                     atomic_write(state_path, json.dumps(state, indent=2) + "\n")
         except OSError as e:
             warn(f"could not update {rc} ({e}); add `source {ENV_SH}` yourself")
