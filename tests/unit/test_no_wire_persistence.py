@@ -5,6 +5,7 @@ import contextlib
 import importlib.util
 import io
 import pathlib
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -78,6 +79,17 @@ class NoWirePersistenceTests(unittest.TestCase):
             u.do_sync(u.load_state(u.load_recipes()), u.load_recipes(), quiet=True)
             for sf in shell_files:
                 self.assertFalse(sf.exists())
+
+    def test_wire_command_takes_state_lock(self):
+        with (
+            patch.object(sys, "argv", ["unienv", "wire"]),
+            patch.object(u, "state_lock") as lock,
+            patch.object(u, "cmd_wire", return_value=0) as wire,
+        ):
+            self.assertEqual(u.main(), 0)
+        lock.assert_called_once_with()
+        lock.return_value.__enter__.assert_called_once()
+        wire.assert_called_once()
 
     def test_cmd_wire_reenables_wire_shells(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
