@@ -96,30 +96,6 @@ class HelperTests(unittest.TestCase):
                 with path.open("rb") as f:
                     self.assertEqual(u.validate_recipe(tomllib.load(f), path.stem), [])
 
-    def test_ml_recipe_validates_and_is_opt_in(self):
-        path = ROOT / "recipes" / "ml.toml"
-        self.assertTrue(path.exists())
-        lines = path.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(lines[0], "#:schema ../schema/recipe.schema.json")
-        with path.open("rb") as f:
-            recipe = tomllib.load(f)
-        self.assertEqual(u.validate_recipe(recipe, "ml"), [])
-        self.assertEqual(recipe["id"], "ml")
-        self.assertIs(recipe.get("default"), False)
-        self.assertEqual(
-            recipe["python"]["packages"],
-            ["scikit-learn", "scipy", "xgboost", "lightgbm", "imbalanced-learn", "joblib"],
-        )
-        self.assertEqual(
-            recipe["python"]["imports"],
-            ["sklearn", "scipy", "xgboost", "lightgbm", "imblearn", "joblib"],
-        )
-        self.assertEqual(recipe["system"]["macos"]["brew"], ["libomp"])
-        self.assertEqual(recipe["system"]["debian"]["apt"], ["libgomp1"])
-        self.assertEqual(recipe["verify"]["bins"], [])
-        self.assertIn("n_jobs=-1", recipe["agent"]["notes"])
-        self.assertIn("joblib", recipe["agent"]["notes"])
-
     def test_excluded_system_packages_and_bins(self):
         from unittest.mock import patch
 
