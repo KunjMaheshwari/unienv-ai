@@ -2,6 +2,7 @@
 """Unit tests for Issue #8: Windows support (winget/Scoop, .cmd shims, venv python path, recipe schema)."""
 
 import contextlib
+import json
 import io
 import subprocess
 import sys
@@ -181,6 +182,32 @@ class WindowsInstallSystemAndShimsTest(unittest.TestCase):
         argv = run.call_args.args[0]
         self.assertTrue(argv[1].startswith("-env:UserInstallation=file:"))
         self.assertEqual(argv[-3:], ["--convert-to", "pdf", "a b.docx"])
+
+    def test_uninstall_removes_only_owned_path_entry(self):
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            entry = str(home / "bin")
+            marker = home / "windows-path.json"
+            marker.write_text(json.dumps({"entry": entry}), encoding="utf-8-sig")
+            key = mock.MagicMock()
+            registry = SimpleNamespace(
+                HKEY_CURRENT_USER=1,
+                KEY_READ=2,
+                KEY_WRITE=4,
+                OpenKey=mock.Mock(return_value=key),
+                QueryValueEx=mock.Mock(return_value=(entry + ";other;later", 2)),
+                SetValueEx=mock.Mock(),
+            )
+            with (
+                mock.patch.object(unienv, "IS_WIN", True),
+                mock.patch.object(unienv, "UNIENV_HOME", home),
+                mock.patch.dict(sys.modules, {"winreg": registry}),
+            ):
+                unienv._remove_windows_path()
+            self.assertEqual(registry.SetValueEx.call_args.args[-1], "other;later")
+            self.assertFalse(marker.exists())
 
     def test_install_ps1_exists(self):
         ps1 = Path(__file__).resolve().parents[2] / "install.ps1"
