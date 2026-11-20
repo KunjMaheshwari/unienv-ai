@@ -22,7 +22,7 @@ class McpClientsTests(unittest.TestCase):
                 mac_clients = u.mcp_clients()
             self.assertEqual(
                 set(mac_clients),
-                {"claude-desktop", "cursor", "windsurf", "lm-studio", "vscode", "zed", "claude-code"},
+                {"claude-desktop", "cursor", "windsurf", "lm-studio", "vscode", "zed"},
             )
             self.assertEqual(
                 mac_clients["vscode"],
@@ -31,7 +31,6 @@ class McpClientsTests(unittest.TestCase):
             self.assertEqual(mac_clients["windsurf"], home / ".codeium/windsurf/mcp_config.json")
             self.assertEqual(mac_clients["lm-studio"], home / ".lmstudio/mcp.json")
             self.assertEqual(mac_clients["zed"], home / ".config/zed/settings.json")
-            self.assertEqual(mac_clients["claude-code"], home / ".claude.json")
 
             with patch.object(u, "HOME", home), patch.object(u, "IS_MAC", False):
                 linux_clients = u.mcp_clients()
@@ -40,6 +39,30 @@ class McpClientsTests(unittest.TestCase):
                 linux_clients["claude-desktop"],
                 home / ".config/Claude/claude_desktop_config.json",
             )
+
+    def test_all_skips_commented_zed_and_never_touches_claude_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            zed = home / ".config/zed/settings.json"
+            zed.parent.mkdir(parents=True)
+            raw = b'{\n// Zed comment\n"context_servers": {}\n}\n'
+            zed.write_bytes(raw)
+            claude = home / ".claude.json"
+            claude.write_bytes(b'{"session":"leave unchanged"}')
+            cursor = home / ".cursor/mcp.json"
+            cursor.parent.mkdir()
+            with (
+                patch.object(u, "HOME", home),
+                patch.object(u, "IS_MAC", False),
+                patch.object(u, "LOG_FILE", home / "log"),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(u.cmd_mcp(argparse.Namespace(action="install", client="all")), 1)
+                self.assertIn("unienv", json.loads(cursor.read_text())["mcpServers"])
+                self.assertEqual(u.cmd_mcp(argparse.Namespace(action="uninstall", client="all")), 1)
+            self.assertEqual(zed.read_bytes(), raw)
+            self.assertEqual(claude.read_bytes(), b'{"session":"leave unchanged"}')
 
     def test_install_doctor_and_uninstall_preserve_existing_servers_and_backups(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:

@@ -26,7 +26,6 @@ unienv mcp install --client windsurf    # Windsurf
 unienv mcp install --client lm-studio   # LM Studio
 unienv mcp install --client vscode      # VS Code / GitHub Copilot
 unienv mcp install --client zed         # Zed
-unienv mcp install --client claude-code # Claude Code
 unienv mcp install --client all         # every supported app that's installed
 ```
 
@@ -38,9 +37,10 @@ unienv mcp install --client all         # every supported app that's installed
 | `lm-studio` | `~/.lmstudio/mcp.json` | `mcpServers` |
 | `vscode` | `~/Library/Application Support/Code/User/mcp.json` (macOS) / `~/.config/Code/User/mcp.json` (Linux) | `servers` |
 | `zed` | `~/.config/zed/settings.json` | `context_servers` |
-| `claude-code` | `~/.claude.json` | `mcpServers` |
 
 This merges a `unienv` entry into the app's MCP config (a timestamped backup is made first) using **absolute paths**, so it works even though desktop apps start with a minimal PATH. **Quit the app fully and reopen it.**
+
+Zed settings that contain comments or other non-JSON syntax are preserved and skipped with a diagnostic; other clients are still configured. Zed's current custom-server schema uses command, args and env under context_servers (https://zed.dev/docs/ai/mcp). Claude Code uses UniEnv through the shell; its frequently rewritten ~/.claude.json state file is never edited by these commands.
 
 ### Option B: Claude Desktop Extension (one click)
 
@@ -79,6 +79,27 @@ New files go to **`~/UniEnv`** unless you or Claude give another path (override 
 - Child processes get an explicit PATH (UniEnv + Homebrew + system), **stdin closed** (no hangs) and capped output (20,000 characters) to protect the model's context.
 - `unienv doctor` performs a real MCP handshake against every configured app.
 - Tested end-to-end in CI (`tests/mcp_test.py`) and with a real MCP client: Claude Code headless with only this server and no shell tools, which created a Word file and its PDF in 24 s.
+
+## Security model
+
+MCP safety annotations are hints to the client, not access controls. Approval prompts depend on the client. The server enforces these environment settings independently of prompts:
+
+- `UNIENV_MCP_MODE=readonly` exposes only `unienv_capabilities`, `read_document`, and `convert_document`. Conversion still writes files: its destination must be exactly the source directory or `UNIENV_WORKDIR` (default `~/UniEnv`). Other output directories are rejected before they are created.
+- `UNIENV_MCP_ALLOW_INSTALL=0` hides and disables `install_package`. Boolean `false`, `no`, and `off` also disable it.
+- `UNIENV_MCP_ROOTS=~/Documents:~/Downloads:~/UniEnv` restricts document input, conversion output and working-directory parameters to these folders and their descendants after resolving symlinks. Include the workdir if you want outputs there. Empty means unrestricted; a nonempty list with no directories is rejected. Paths are separated by `:` on supported macOS/Linux systems.
+- Configuring roots also hides and disables `run_python`, `run_tool`, and `install_package`, even in full mode: arbitrary Python, command arguments and package installation cannot be confined by checking a working directory.
+- Conversion uses Pandoc's `--sandbox` only when roots are configured or readonly mode is active, so referenced local or remote resources cannot be read implicitly in safe mode. Safe mode requires Pandoc 2.15 or newer; an older version fails rather than disabling the sandbox. Normal mode keeps compatibility with older Pandoc and embedded resources. Documents depending on external images or includes may lose those resources or fail to convert. Dangling symlinks count as occupied output names and are never reused.
+
+The Claude Desktop extension exposes **MCP mode**, **Allow package installation**, and **Allowed folders** alongside **Output folder** in its settings. Defaults preserve full access. For other clients, put the variables in the server's `env` configuration and restart the server.
+
+These controls restrict the server's exposed tools and explicit paths; they are not an OS sandbox. Document parsers and converters still run as your user, and concurrent filesystem changes can race path checks. Process untrusted documents using an OS sandbox or a separate account for stronger isolation. Without roots or readonly mode, `run_python` and `run_tool` have your account's filesystem and network access; disabling installation alone does not limit code execution.
+## Cancellation and progress
+
+Long-running tool calls run on a worker while the server continues answering pings and cancellation notifications. When a call supplies `params._meta.progressToken`, the server reports its start, sends progress approximately every 10 seconds while waiting for a child process, and reports completion. Progress is an increasing activity counter, not a percentage; the total is omitted because the amount of work is unknown.
+
+Send `notifications/cancelled` with the original `requestId` to cancel a queued or running tool call. The server stops its process group, cleans up, and does not send a response for an accepted cancellation. Unknown, completed, and malformed cancellation IDs are ignored. Package installation is deliberately non-cancellable: cancellation is ignored and the normal response is sent after the install completes or rolls back. This protects package state from interruption.
+
+Timeout and cancellation cleanup share a process-group termination helper and a bounded pipe drain. Descendants that deliberately detach into a new session cannot be terminated by killing the original process group; however, an inherited open pipe cannot hold the MCP worker indefinitely.
 
 ## What it can't do
 
