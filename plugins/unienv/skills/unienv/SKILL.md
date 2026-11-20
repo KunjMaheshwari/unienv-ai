@@ -1,6 +1,6 @@
 ---
 name: unienv
-description: Use for any document, spreadsheet, presentation, PDF, OCR, image or data task outside a project (docx, xlsx, pptx, pdf, csv, parquet, png). Reads ~/.unienv/manifest.json dynamically to discover preinstalled Python, Node and system tools, or provides the one-line install command if UniEnv is not installed.
+description: Use for any document, spreadsheet, presentation, PDF, OCR, image or data task outside a project (docx, xlsx, pptx, pdf, csv, parquet, png). Instructs Claude to read ~/.unienv/manifest.json to discover preinstalled Python, Node and system tools, or provides the one-line install command if UniEnv is not installed.
 ---
 
 # UniEnv AI: shared environment for Claude Code
@@ -8,7 +8,7 @@ description: Use for any document, spreadsheet, presentation, PDF, OCR, image or
 Before creating a temporary virtualenv or running `pip install`, check whether UniEnv AI is installed on this machine:
 
 1. **Inspect `~/.unienv/manifest.json`** (or run `~/.unienv/bin/unienv list --json`) to see the exact pre-installed Python packages, Node modules, and system tools on this machine.
-2. **If `~/.unienv/manifest.json` does not exist**, tell the user or run the one-line installer:
+2. **If `~/.unienv/manifest.json` does not exist**, tell the user how to install UniEnv with the one-line installer; do not run it automatically:
    ```bash
    curl -fsSL https://raw.githubusercontent.com/rupeshbharambe24/unienv-ai/main/install.sh | bash
    ```

@@ -8,8 +8,7 @@
     {
       "name": "unienv",
       "source": "./plugins/unienv",
-      "description": "One always-ready environment shared by every AI tool: pre-installed Python, Node, Office, PDF, OCR and data tools plus MCP server.",
-      "version": "0.2.2"
+      "description": "One always-ready environment shared by every AI tool: pre-installed Python, Node, Office, PDF, OCR and data tools plus MCP server."
     }
   ]
 }

@@ -11,8 +11,9 @@ UniEnv reaches AI tools in two ways:
 | **Codex CLI** | `$CODEX_HOME/AGENTS.md` (default `~/.codex/AGENTS.md`) | `~/.codex/skills/unienv/SKILL.md` | `~/.codex/` or `codex` |
 | **Gemini CLI** | `~/.gemini/GEMINI.md` | none | `~/.gemini/` or `gemini` |
 | **OpenCode** | `~/.config/opencode/AGENTS.md` | none | `~/.config/opencode/` or `opencode` |
+| **Windsurf** | `~/.codeium/windsurf/memories/global_rules.md` ([docs](https://docs.windsurf.com/windsurf/cascade/memories#rules)) | none | `~/.codeium/windsurf/` or `windsurf` |
 | **Cursor** | paste `~/.unienv/AGENTS.md` into *Settings → Rules → User Rules*; MCP tools via `unienv mcp install --client cursor` | none | manual for now ([#4](https://github.com/rupeshbharambe24/unienv-ai/issues/4)) |
-| **Windsurf, Cline, Roo, Copilot, Aider** | paste `~/.unienv/AGENTS.md` into the tool's global rules | none | adapters planned, help wanted |
+| **Cline, Roo, Copilot, Aider** | paste `~/.unienv/AGENTS.md` into the tool's global rules | none | adapters planned, help wanted |
 | **Claude Desktop chat** | **UniEnv MCP server**: `unienv mcp install` or the `.mcpb` extension ([guide](mcp.md)) | n/a | config file |
 | **LM Studio, other MCP apps** | MCP server via `unienv mcp config` | n/a | manual |
 
@@ -22,7 +23,7 @@ Run `unienv sync --all-agents` to write instruction files even for tools that ar
 
 **Claude Code** reads `CLAUDE.md`, not `AGENTS.md`, when both exist, so UniEnv writes to `CLAUDE.md`. Its Bash tool runs `zsh -c` (or your shell) per command, so `~/.zshenv` wiring is what makes tools visible. Restart Claude Code after installing so it re-reads its environment and skills.
 
-You can also install UniEnv as a **Claude Code plugin**, which bundles the dynamic `unienv` skill (reading `~/.unienv/manifest.json`) and registers the `unienv` MCP server (`~/.unienv/bin/unienv mcp`) in a single step:
+You can also install UniEnv as a **Claude Code plugin**, which bundles the `unienv` skill (reading `~/.unienv/manifest.json`) and registers the `unienv` MCP server (`~/.unienv/bin/unienv mcp`) in a single step:
 
 ```text
 /plugin marketplace add rupeshbharambe24/unienv-ai
@@ -32,6 +33,8 @@ You can also install UniEnv as a **Claude Code plugin**, which bundles the dynam
 **Codex CLI** runs commands through a login shell by default, which reads `~/.profile` (or `~/.bash_profile`). In `workspace-write` sandbox mode, network access is off by default. `unienv need` from inside Codex may need approval to reach PyPI or Homebrew.
 
 **Gemini CLI** loads `~/.gemini/GEMINI.md` as global context.
+
+**Windsurf** loads global rules from `~/.codeium/windsurf/memories/global_rules.md` ([Windsurf Rules docs](https://docs.windsurf.com/windsurf/cascade/memories#rules)).
 
 **Desktop apps** don't start a shell and get the system's minimal PATH. That's why MCP servers configured as `npx …` or `uvx …` fail with `spawn ENOENT`. Use absolute paths, for example `"command": "/Users/you/.unienv/bin/ue-py"`.
 
