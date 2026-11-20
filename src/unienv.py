@@ -940,13 +940,16 @@ def wire_shells(state: dict | None = None) -> list[str]:
     if _nu_config_dir().exists() or which("nu"):
         nu_body = render_nu_body(state)
         if _nu_env_path().exists():
-            remove_block(_nu_env_path(), SHELL_BEGIN, SHELL_END)
-        for nu_path in (_nu_autoload_path(),):
             try:
-                if upsert_block(nu_path, nu_body, SHELL_BEGIN, SHELL_END):
-                    changed.append(str(nu_path).replace(str(HOME), "~"))
+                remove_block(_nu_env_path(), SHELL_BEGIN, SHELL_END)
             except OSError as e:
-                warn(f"could not update {nu_path} ({e})")
+                warn(f"could not clean legacy block from {_nu_env_path()} ({e})")
+        nu_path = _nu_autoload_path()
+        try:
+            if upsert_block(nu_path, nu_body, SHELL_BEGIN, SHELL_END):
+                changed.append(str(nu_path).replace(str(HOME), "~"))
+        except OSError as e:
+            warn(f"could not update {nu_path} ({e})")
     return changed
 
 
@@ -1608,7 +1611,9 @@ def cmd_doctor(args) -> int:
     ]
     fish_bin = which("fish")
     if fish_bin:
-        probes.append(("fish -c", [fish_bin, "-c", "command -v ue-py"], None))
+        xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+        fish_env = {"XDG_CONFIG_HOME": xdg} if xdg else None
+        probes.append(("fish -c", [fish_bin, "-c", "command -v ue-py"], fish_env))
     zdot = _zdotdir()
     if zdot is not None:
         probes.append(("ZDOTDIR zsh -c", ["/bin/zsh", "-c", "command -v ue-py"], {"ZDOTDIR": str(zdot)}))
