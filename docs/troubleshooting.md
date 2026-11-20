@@ -12,8 +12,9 @@ unienv doctor --json   # attach this to bug reports
 
 - Restart the AI tool (or open a new terminal). Running apps keep the PATH they started with.
 - Check the shell wiring: `unienv doctor` shows a ✗ for any shell mode that can't see UniEnv. `unienv wire` rewrites the blocks.
-- If `ZDOTDIR` is set (for example `ZDOTDIR=~/.config/zsh`), zsh reads `$ZDOTDIR/.zshenv` instead of `~/.zshenv`. Run `unienv sync` (or `unienv wire`) with `ZDOTDIR` set so UniEnv wires `$ZDOTDIR/.zshenv` as well.
 - Desktop apps never read shell files: use absolute paths from `~/.unienv/manifest.json`.
+
+ZDOTDIR wiring is remembered in state.json, so uninstall removes it even from a shell or GUI without ZDOTDIR set.
 
 ## The agent still creates a virtualenv
 

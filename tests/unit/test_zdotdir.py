@@ -37,8 +37,11 @@ class ZdotdirTests(unittest.TestCase):
                 self.assertIn("~/.config/zsh/.zshenv", changed)
                 self.assertIsNotNone(u.read_block(zdot / ".zshenv", u.SHELL_BEGIN, u.SHELL_END))
                 self.assertIsNotNone(u.read_block(home / ".zshenv", u.SHELL_BEGIN, u.SHELL_END))
+                saved = json.loads((unienv_home / "state.json").read_text())
+                self.assertIn(str((zdot / ".zshenv").resolve()), saved["wired_shell_files"])
 
                 with (
+                    patch.dict(os.environ, {"ZDOTDIR": ""}),
                     patch.object(u, "agent_targets", return_value=[]),
                     patch.object(u, "mcp_clients", return_value={}),
                     patch.object(u, "LAUNCH_AGENT", home / "none.plist"),
