@@ -503,11 +503,13 @@ def write_package_json(packages: list[str]) -> None:
     pj.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def install_node(packages: list[str]) -> None:
+def install_node(packages: list[str], *, require_npm: bool = False) -> None:
     if not packages:
         return
     npm = which("npm")
     if not npm:
+        if require_npm:
+            raise RuntimeError("npm not found: install Node.js (`unienv need --bin node`)")
         warn("npm not found; skipping Node batteries (install Node.js, then `unienv install`).")
         return
     write_package_json(packages)
@@ -706,6 +708,15 @@ def agent_targets() -> list[dict]:
             "instructions": HOME / ".config/opencode/AGENTS.md",
             "skills": None,
         },
+        {
+            # https://docs.windsurf.com/windsurf/cascade/memories#rules
+            "id": "windsurf",
+            "name": "Windsurf",
+            "detect": [HOME / ".codeium/windsurf"],
+            "bin": "windsurf",
+            "instructions": HOME / ".codeium/windsurf/memories/global_rules.md",
+            "skills": None,
+        },
     ]
 
 
@@ -868,23 +879,30 @@ def cmd_sync(args) -> int:
     return 0
 
 
-def _ver_tuple(v: str) -> tuple[int, ...]:
-    nums = [int(n) for n in re.findall(r"\d+", v.split("+", 1)[0].split("-", 1)[0])]
-    while len(nums) > 1 and nums[-1] == 0:
-        nums.pop()
-    return tuple(nums or [0])
+def _ver_tuple(v: str) -> tuple[int, ...] | None:
+    # Complex versions require a full PEP 440 / npm parser. Never guess.
+    if not re.fullmatch(r"\d+(?:\.\d+)*", v):
+        return None
+    parts = [int(n) for n in v.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
 
 
-def _version_matches(installed: str, op: str, target: str) -> bool:
-    if op in ("==", "===") and target.endswith(".*"):
-        prefix = [int(n) for n in re.findall(r"\d+", target[:-2])]
-        inst = [int(n) for n in re.findall(r"\d+", installed.split("+", 1)[0])]
-        return inst[: len(prefix)] == prefix
-    if op == "!=" and target.endswith(".*"):
-        return not _version_matches(installed, "==", target)
+def _version_matches(installed: str, op: str, target: str) -> bool | None:
     iv = _ver_tuple(installed)
-    tv = _ver_tuple(target)
-    if op in ("==", "===", "="):
+    wildcard = target.endswith(".*")
+    tv = _ver_tuple(target[:-2] if wildcard else target)
+    if iv is None or tv is None:
+        return None
+    if wildcard:
+        if op not in ("==", "!="):
+            return None
+        prefix = tuple(int(n) for n in target[:-2].split("."))
+        values = tuple(int(n) for n in installed.split("."))
+        result = values[: len(prefix)] == prefix
+        return result if op == "==" else not result
+    if op in ("==", "=", "==="):
         return iv == tv
     if op == "!=":
         return iv != tv
@@ -896,22 +914,24 @@ def _version_matches(installed: str, op: str, target: str) -> bool:
         return iv > tv
     if op == "<":
         return iv < tv
-    if op in ("~=", "~"):
-        raw = [int(n) for n in re.findall(r"\d+", target)]
-        upper = tuple(raw[:-2] + [raw[-2] + 1]) if len(raw) >= 2 else (raw[0] + 1,)
+    raw = [int(n) for n in target.split(".")]
+    if op == "~=":
+        if len(raw) < 2:
+            return None
+        upper = tuple(raw[:-2] + [raw[-2] + 1])
+        return tv <= iv < upper
+    if op == "~":
+        upper = (raw[0] + 1,) if len(raw) == 1 else (raw[0], raw[1] + 1)
         return tv <= iv < upper
     if op == "^":
-        raw = [int(n) for n in re.findall(r"\d+", target)]
+        if len(raw) < 3:
+            return None
         while len(raw) < 3:
             raw.append(0)
-        if raw[0] > 0:
-            upper = (raw[0] + 1,)
-        elif raw[1] > 0:
-            upper = (0, raw[1] + 1)
-        else:
-            upper = (0, 0, raw[2] + 1)
+        index = next((i for i, n in enumerate(raw) if n), len(raw) - 1)
+        upper = tuple(raw[:index] + [raw[index] + 1])
         return tv <= iv < upper
-    return False
+    return None
 
 
 def _installed_versions(kind: str, pkgs: list[str]) -> dict[str, str]:
@@ -937,7 +957,7 @@ def _spec_satisfied(
     spec: str,
     manifest_pkgs: dict[str, str],
     configured_specs: list[str] | None = None,
-) -> tuple[bool, str | None]:
+) -> tuple[bool | None, str | None]:
     if kind == "python":
         name = py_name(spec)
         installed = manifest_pkgs.get(name)
@@ -954,14 +974,17 @@ def _spec_satisfied(
                     if em:
                         have_extras.update(e.strip().lower() for e in em.group(1).split(",") if e.strip())
             if not req_extras.issubset(have_extras):
-                return False, installed
+                return None, installed
         if ver_part:
             if not installed:
-                return False, None
+                return None, None
+            matches = []
             for clause in (c.strip() for c in ver_part.split(",") if c.strip()):
-                cm = re.match(r"^(===|==|!=|~=|>=|<=|>|<)\s*(.+)$", clause)
-                if not cm or not _version_matches(installed, cm.group(1), cm.group(2).strip()):
-                    return False, installed
+                cm = re.fullmatch(r"(===|==|!=|~=|>=|<=|>|<)\s*(.+)", clause)
+                matches.append(_version_matches(installed, cm.group(1), cm.group(2).strip()) if cm else None)
+            if None in matches:
+                return None, installed
+            return all(matches), installed
         return True, installed
     if kind == "node":
         name = node_name(spec)
@@ -970,11 +993,21 @@ def _spec_satisfied(
         if ver in ("latest", "*"):
             return True, installed
         if not installed:
-            return False, None
+            return None, None
+        if re.fullmatch(r"\d+(?:\.\d+){0,1}", ver):
+            prefix = tuple(int(n) for n in ver.split("."))
+            iv = _ver_tuple(installed)
+            if iv is None:
+                return None, installed
+            full = tuple(int(n) for n in installed.split("."))
+            return full[: len(prefix)] == prefix, installed
+        matches = []
         for clause in (c.strip() for c in ver.split() if c.strip()):
-            cm = re.match(r"^(\^|~|>=|<=|>|<|=)?\s*(\d.*)$", clause)
-            if not cm or not _version_matches(installed, cm.group(1) or "==", cm.group(2).strip()):
-                return False, installed
+            cm = re.fullmatch(r"(\^|~|>=|<=|>|<|=)?\s*(\d+(?:\.\d+)*)", clause)
+            matches.append(_version_matches(installed, cm.group(1) or "==", cm.group(2)) if cm else None)
+        if None in matches:
+            return None, installed
+        return all(matches), installed
         return True, installed
     return True, manifest_pkgs.get(spec)
 
@@ -992,12 +1025,18 @@ def cmd_need(args) -> int:
     key = {"python": py_name, "node": node_name}.get(kind, lambda s: s)
     present = {key(p) for p in w[kind]}
     already = [p for p in pkgs if key(p) in present]
-    if already and kind in ("python", "node"):
+    constrained = [
+        p
+        for p in already
+        if (kind == "python" and ("[" in p or re.search(r"[<>=!~]", p)))
+        or (kind == "node" and node_version(p) not in ("latest", "*"))
+    ]
+    if constrained and kind in ("python", "node"):
         manifest_pkgs = _installed_versions(kind, w[kind] + already)
         unsatisfied = False
-        for p in already:
+        for p in constrained:
             ok, inst_ver = _spec_satisfied(kind, p, manifest_pkgs, w[kind])
-            if not ok:
+            if ok is False:
                 ver_label = f" {inst_ver}" if inst_ver else ""
                 warn(
                     f"{key(p)}{ver_label} is installed; `{p}` isn't satisfied. "
@@ -1043,7 +1082,7 @@ def cmd_need(args) -> int:
         if kind == "python":
             install_python(w["python"])
         elif kind == "node":
-            install_node(w["node"])
+            install_node(w["node"], require_npm=True)
         else:
             failed = install_system(
                 {
@@ -1073,6 +1112,154 @@ def cmd_need(args) -> int:
     log_event(event="need", kind=kind, packages=new, curated=not uncurated)
     via = {"python": "ue-py", "node": "ue-node"}.get(kind, "PATH")
     info(f"✓ installed {', '.join(new)}; available to every AI tool via {via}")
+    return 0
+
+
+def _verify_python_imports(recipes: list[dict]) -> dict[str, str]:
+    """Verify battery Python imports. Returns a dict of {module: error_string} for failures."""
+    imports = uniq([m for r in recipes for m in r.get("python", {}).get("imports", [])])
+    if not imports:
+        return {}
+    py = PY_DIR / ".venv/bin/python"
+    if not py.exists():
+        return {"python": "shared Python env missing"}
+    code = (
+        "import importlib, json\nbad = {}\n"
+        f"for m in {imports!r}:\n"
+        "    try: importlib.import_module(m)\n"
+        "    except Exception as e: bad[m] = f'{type(e).__name__}: {e}'[:120]\n"
+        "print(json.dumps(bad))"
+    )
+    r = run([str(py), "-P", "-c", code], capture=True, check=False, timeout=120)
+    if r.returncode != 0:
+        return {"python": (r.stderr or r.stdout or "import check failed").strip()[:200]}
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return {"python": "could not parse import check output"}
+
+
+def cmd_upgrade(args) -> int:
+    recipes_all = load_recipes()
+    state = load_state(recipes_all)
+    recipes = active_recipes(recipes_all, state)
+    w = wanted(recipes, state)
+    pkgs = args.packages or []
+    do_py = not args.node
+    do_node = bool(args.node) or (not pkgs and bool(w["node"]))
+
+    if args.dry_run:
+        if do_py and (PY_DIR / "pyproject.toml").exists():
+            uv = find_uv()
+            uv_cmd = [uv, "lock", "--project", str(PY_DIR), "--managed-python", "--dry-run"]
+            if pkgs:
+                for p in pkgs:
+                    uv_cmd.extend(["--upgrade-package", py_name(p)])
+            else:
+                uv_cmd.append("--upgrade")
+            r = run(uv_cmd, capture=True, check=False, env={"UV_PROJECT_ENVIRONMENT": str(PY_DIR / ".venv")})
+            out = ((r.stdout or "") + (r.stderr or "")).strip()
+            info(out or "Python packages: all up to date")
+        if do_node and (NODE_DIR / "package.json").exists():
+            npm = which("npm")
+            if npm:
+                r = run([npm, "outdated", *pkgs], cwd=NODE_DIR, capture=True, check=False)
+                out = (r.stdout or "").strip()
+                info(out or "Node packages: all up to date")
+        return 0
+
+    before_py = python_packages() if do_py else {}
+    before_node = node_packages(w["node"]) if do_node else {}
+
+    tracked = [
+        STATE_FILE,
+        PY_DIR / "pyproject.toml",
+        PY_DIR / "uv.lock",
+        NODE_DIR / "package.json",
+        NODE_DIR / "package-lock.json",
+    ]
+    existed = {f: f.exists() for f in tracked}
+    snap = BACKUP_DIR / _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    snap.mkdir(parents=True, exist_ok=True)
+    for f in tracked:
+        if existed[f]:
+            shutil.copy2(f, snap / f"{f.parent.name}__{f.name}")
+
+    try:
+        if do_py:
+            uv = find_uv()
+            write_pyproject(w["python"])
+            uv_cmd = [uv, "lock", "--project", str(PY_DIR), "--managed-python"]
+            if pkgs:
+                for p in pkgs:
+                    uv_cmd.extend(["--upgrade-package", py_name(p)])
+            else:
+                uv_cmd.append("--upgrade")
+            run(uv_cmd, env={"UV_PROJECT_ENVIRONMENT": str(PY_DIR / ".venv")})
+            install_python(w["python"])
+            bad_imports = _verify_python_imports(recipes)
+            if bad_imports:
+                details = "; ".join(f"{m}: {err}" for m, err in bad_imports.items())
+                raise RuntimeError(f"import check failed after upgrade ({details})")
+        if do_node and w["node"]:
+            npm = which("npm")
+            if not npm:
+                if args.node:
+                    raise RuntimeError("npm not found")
+                warn("npm not found; skipping Node upgrade")
+            else:
+                if not (NODE_DIR / "package.json").exists():
+                    write_package_json(w["node"])
+                run(
+                    [
+                        npm,
+                        "update",
+                        "--save",
+                        "--no-audit",
+                        "--no-fund",
+                        "--loglevel=error",
+                        "--progress=false",
+                        "--no-update-notifier",
+                        *pkgs,
+                    ],
+                    cwd=NODE_DIR,
+                )
+    except (subprocess.CalledProcessError, RuntimeError, SystemExit) as e:
+        warn(f"upgrade failed ({e}); rolling back")
+        for f in tracked:
+            if existed[f]:
+                shutil.copy2(snap / f"{f.parent.name}__{f.name}", f)
+            elif f.exists():
+                f.unlink()
+        state = load_state(recipes_all)
+        try:
+            if do_py and existed[PY_DIR / "pyproject.toml"]:
+                install_python(wanted(recipes, state)["python"])
+            if do_node and existed[NODE_DIR / "package.json"]:
+                install_node(wanted(recipes, state)["node"])
+        except (subprocess.CalledProcessError, RuntimeError, SystemExit) as re_err:
+            warn(f"rollback re-install failed ({re_err}); run unienv install to repair")
+        log_event(event="upgrade-failed", packages=pkgs, node=bool(args.node))
+        return 1
+
+    after_py = python_packages() if do_py else {}
+    after_node = node_packages(w["node"]) if do_node else {}
+    changes = []
+    for k in sorted(set(before_py) | set(after_py)):
+        b, a = before_py.get(k), after_py.get(k)
+        if b != a and a is not None:
+            changes.append(f"{k} {b or '(new)'} -> {a}")
+    for k in sorted(set(before_node) | set(after_node)):
+        b, a = before_node.get(k), after_node.get(k)
+        if b != a and a is not None:
+            changes.append(f"node:{k} {b or '(new)'} -> {a}")
+
+    do_sync(state, recipes_all, quiet=True)
+    log_event(event="upgrade", packages=pkgs, changes=changes)
+    if changes:
+        info("✓ upgraded: " + ", ".join(changes))
+    else:
+        info("✓ all packages already at latest compatible versions")
     return 0
 
 
@@ -1132,7 +1319,7 @@ def cmd_status(args) -> int:
     return 0
 
 
-REPO_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/archive/refs/heads/{ref}.tar.gz"
+REPO_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/archive/{ref}.tar.gz"
 
 
 # ── MCP server for desktop apps ─────────────────────────────────────────────
@@ -1257,6 +1444,7 @@ def cmd_update(args) -> int:
     """Download the latest UniEnv, replace ~/.unienv/share, then re-run install with the new code."""
     import tarfile
     import tempfile
+    import urllib.error
     import urllib.request
 
     share = UNIENV_HOME / "share"
@@ -1266,7 +1454,11 @@ def cmd_update(args) -> int:
     step(f"Downloading {url}")
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "unienv.tar.gz"
-        urllib.request.urlretrieve(url, archive)
+        try:
+            with urllib.request.urlopen(url) as resp, archive.open("wb") as out:
+                shutil.copyfileobj(resp, out)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+            die(f"could not download UniEnv ref {args.ref!r} ({e}); check the branch or tag name")
         with tarfile.open(archive) as tar:
             tar.extractall(tmp, filter="data")
         src = next(Path(tmp).glob("unienv-ai-*"))
@@ -1689,6 +1881,12 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.add_argument("-y", "--yes", action="store_true")
     s.set_defaults(fn=cmd_need)
 
+    s = sub.add_parser("upgrade", help="upgrade installed Python and Node packages with automatic rollback")
+    s.add_argument("packages", nargs="*", help="specific packages to upgrade (default: all)")
+    s.add_argument("--node", action="store_true", help="upgrade Node packages")
+    s.add_argument("--dry-run", action="store_true", help="show what would be upgraded without changing anything")
+    s.set_defaults(fn=cmd_upgrade)
+
     s = sub.add_parser("doctor", help="verify tools, shell wiring, agent files and secrets hygiene")
     s.add_argument("--json", action="store_true", help="machine-readable output for agents and CI")
     s.add_argument("--fix", action="store_true", help="apply safe fixes (regenerate wiring), then re-check")
@@ -1733,7 +1931,11 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.set_defaults(fn=lambda a: print(BIN) or 0)
 
     args = p.parse_args(argv)
-    mutating = args.cmd in ("install", "need", "sync", "uninstall") or (args.cmd == "doctor" and args.fix)
+    mutating = (
+        args.cmd in ("install", "need", "sync", "uninstall")
+        or (args.cmd == "upgrade" and not args.dry_run)
+        or (args.cmd == "doctor" and args.fix)
+    )
     try:
         with state_lock() if mutating else contextlib.nullcontext():
             return args.fn(args)

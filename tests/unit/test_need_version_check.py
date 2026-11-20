@@ -17,6 +17,14 @@ import unienv  # noqa: E402
 
 
 class SpecSatisfiedUnitTest(unittest.TestCase):
+    def test_conservative_unknowns_and_npm_partial_versions(self):
+        for spec in ("docx@9", "docx@9.x", "docx@^8 || ^9", "docx@next"):
+            with self.subTest(spec=spec):
+                self.assertIsNot(unienv._spec_satisfied("node", spec, {"docx": "9.5.0"})[0], False)
+        self.assertTrue(unienv._spec_satisfied("node", "docx@~1.2", {"docx": "1.2.8"})[0])
+        self.assertFalse(unienv._spec_satisfied("node", "docx@~1.2", {"docx": "1.3.0"})[0])
+        self.assertIsNone(unienv._spec_satisfied("python", "pandas>=2.0", {"pandas": "2.0.0rc1"})[0])
+
     def test_python_bare_name_always_satisfied(self):
         ok, ver = unienv._spec_satisfied("python", "pandas", {"pandas": "2.2.3"})
         self.assertTrue(ok)
@@ -42,7 +50,7 @@ class SpecSatisfiedUnitTest(unittest.TestCase):
         configured = ["markitdown[docx,pptx,xlsx]>=0.1", "markitdown[pdf]>=0.1"]
         self.assertTrue(unienv._spec_satisfied("python", "markitdown[docx]>=0.1", pkgs, configured)[0])
         self.assertTrue(unienv._spec_satisfied("python", "markitdown[pdf,xlsx]", pkgs, configured)[0])
-        self.assertFalse(unienv._spec_satisfied("python", "markitdown[audio]>=0.1", pkgs, configured)[0])
+        self.assertIsNone(unienv._spec_satisfied("python", "markitdown[audio]>=0.1", pkgs, configured)[0])
 
     def test_node_version_comparisons(self):
         pkgs = {"docx": "8.5.0", "@scope/pkg": "1.2.3"}
@@ -93,6 +101,11 @@ class CmdNeedVersionCheckTest(unittest.TestCase):
                 rc = unienv.cmd_need(args)
             return rc, out.getvalue(), err.getvalue()
 
+    def test_bare_names_do_not_start_installed_version_lookup(self):
+        with mock.patch.object(unienv, "_installed_versions", side_effect=AssertionError("unexpected lookup")):
+            rc, _, _ = self._run_need(["pandas"])
+            self.assertEqual(rc, 0)
+
     def test_unsatisfied_python_version_exits_nonzero_without_checkmark(self):
         rc, out, err = self._run_need(["pandas>=99"])
         self.assertEqual(rc, 1)
@@ -120,9 +133,9 @@ class CmdNeedVersionCheckTest(unittest.TestCase):
 
     def test_unsatisfied_python_extra_exits_nonzero(self):
         rc, out, err = self._run_need(["markitdown[audio]>=0.1"])
-        self.assertEqual(rc, 1)
-        self.assertNotIn("✓", out)
-        self.assertIn("markitdown 0.1.1 is installed; `markitdown[audio]>=0.1` isn't satisfied.", err)
+        self.assertEqual(rc, 0)
+        self.assertIn("✓", out)
+        self.assertNotIn("markitdown 0.1.1 is installed; `markitdown[audio]>=0.1` isn't satisfied.", err)
 
 
 if __name__ == "__main__":
