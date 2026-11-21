@@ -16,6 +16,12 @@ brew = ["libomp"]
 [system.debian]
 apt = ["libgomp1"]
 
+[system.fedora]
+dnf = ["libgomp"]
+
+[system.arch]
+pacman = []
+
 [verify]
 bins = []
 

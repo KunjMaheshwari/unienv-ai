@@ -188,22 +188,30 @@ def uniq(items) -> list:
     return out
 
 
-def _os_release_tokens(path: Path = Path("/etc/os-release")) -> set[str]:
+def _os_release_info(path: Path = Path("/etc/os-release")) -> tuple[str, set[str]]:
     if not path.exists():
-        return set()
+        return "", set()
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
-        return set()
+        return "", set()
+    distro_id = ""
     tokens: set[str] = set()
     for line in text.splitlines():
         if "=" not in line or line.lstrip().startswith("#"):
             continue
         k, _, v = line.strip().partition("=")
-        if k in ("ID", "ID_LIKE"):
-            for tok in v.strip("\"'").lower().split():
-                tokens.add(tok)
-    return tokens
+        vals = v.strip("\"'").lower().split()
+        if k == "ID" and vals:
+            distro_id = vals[0]
+            tokens.add(distro_id)
+        elif k == "ID_LIKE":
+            tokens.update(vals)
+    return distro_id, tokens
+
+
+def _os_release_tokens(path: Path = Path("/etc/os-release")) -> set[str]:
+    return _os_release_info(path)[1]
 
 
 def platform_key() -> str:
@@ -211,17 +219,13 @@ def platform_key() -> str:
         return "macos"
     if Path("/etc/debian_version").exists():
         return "debian"
-    tokens = _os_release_tokens()
+    distro_id, tokens = _os_release_info()
     if tokens & {"debian", "ubuntu"}:
         return "debian"
-    if tokens & {"rhel", "centos", "rocky", "almalinux"}:
-        return sys.platform
-    if "fedora" in tokens or Path("/etc/fedora-release").exists():
+    if distro_id == "fedora" or Path("/etc/fedora-release").exists():
         return "fedora"
     if tokens & {"arch", "manjaro", "endeavouros"} or Path("/etc/arch-release").exists():
         return "arch"
-    if which("dnf"):
-        return "fedora"
     if which("pacman"):
         return "arch"
     return sys.platform
@@ -508,7 +512,7 @@ def _apt_installed(pkg: str) -> bool:
 
 
 def _dnf_installed(pkg: str) -> bool:
-    return run(["rpm", "-q", pkg], capture=True, check=False).returncode == 0
+    return run(["rpm", "-q", "--whatprovides", pkg], capture=True, check=False).returncode == 0
 
 
 def _pacman_installed(pkg: str) -> bool:
