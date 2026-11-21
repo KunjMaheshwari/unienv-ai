@@ -290,8 +290,11 @@ UniEnv is free and open source. If it saves you time, please **[give it a star o
 
 Thank you to everyone who has helped build UniEnv AI: [@bfs2021](https://github.com/bfs2021), [@SantanDon](https://github.com/SantanDon), [@CyberKun](https://github.com/CyberKun), [@sanjanamg0](https://github.com/sanjanamg0) and [@KunjMaheshwari](https://github.com/KunjMaheshwari). Want to see your name here? Pick an [issue](https://github.com/rupeshbharambe24/unienv-ai/labels/good%20first%20issue).
 
+
+### Windows
+
+`install.ps1` copies UniEnv files into `%USERPROFILE%\.unienv\share` without requiring Developer Mode or symlink privileges (including `--dev` from a local checkout), and refuses to overwrite an existing symlinked/junctioned `share` directory so its target is never modified. Both `.cmd` wrappers and Git Bash shims target the Windows Python environment, and `unienv uninstall` removes only the user `PATH` entry added by the installer.
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Tools installed by recipes keep their own licenses (see each recipe's `license_note`).
-
-Windows installations copy the checkout with install.ps1 --dev; they do not require symlink privileges. Reinstall refuses existing linked share directories to protect their targets. Git Bash wrappers use the Windows Python environment. Uninstall removes only the user PATH entry added by the installer.

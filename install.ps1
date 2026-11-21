@@ -10,7 +10,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$Repo = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$Repo = if ($PSScriptRoot) { $PSScriptRoot } else { "" }
 $Ref = if ($env:UNIENV_REF) { $env:UNIENV_REF } else { "main" }
 $UniEnvHome = if ($env:UNIENV_HOME) { $env:UNIENV_HOME } else { Join-Path $HOME ".unienv" }
 $env:UNIENV_HOME = $UniEnvHome
@@ -37,7 +37,7 @@ function Say($msg) {
 # 0. Download tarball if not run from a local checkout
 $TmpSrc = $null
 try {
-    if (-not (Test-Path (Join-Path $Repo "src\unienv.py"))) {
+    if (-not $Repo -or -not (Test-Path (Join-Path $Repo "src\unienv.py"))) {
         if ($Dev) {
             Write-Error "--dev needs a git checkout: git clone https://github.com/rupeshbharambe24/unienv-ai"
             exit 2
@@ -100,14 +100,20 @@ try {
         Copy-Item -Recurse -Force (Join-Path $Repo $part) (Join-Path $ShareDir $part)
     }
 
-    # 4. Ensure ~/.unienv/bin is on the user PATH
+    # 4. Ensure ~/.unienv/bin is on the user PATH (preserving %VAR% entries and REG_EXPAND_SZ)
     $BinDir = Join-Path $UniEnvHome "bin"
-    $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if (-not $UserPath) { $UserPath = "" }
-    if (($UserPath -split ";") -notcontains $BinDir) {
-        $NewUserPath = if ($UserPath) { "$BinDir;$UserPath" } else { $BinDir }
-        @{ entry = $BinDir } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $UniEnvHome "windows-path.json")
-        [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
+    $EnvKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+    try {
+        $UserPath = $EnvKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $PathKind = try { $EnvKey.GetValueKind("Path") } catch { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+        if (-not $UserPath) { $UserPath = "" }
+        if (($UserPath -split ";") -notcontains $BinDir) {
+            $NewUserPath = if ($UserPath) { "$BinDir;$UserPath" } else { $BinDir }
+            @{ entry = $BinDir } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $UniEnvHome "windows-path.json")
+            $EnvKey.SetValue("Path", $NewUserPath, $PathKind)
+        }
+    } finally {
+        $EnvKey.Close()
     }
     $env:Path = "$(Split-Path $Uv -Parent);$BinDir;$env:Path"
 

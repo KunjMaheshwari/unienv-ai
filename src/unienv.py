@@ -357,8 +357,8 @@ def atomic_write(path: Path, text: str) -> None:
 def state_lock():
     """Serialise commands that change ~/.unienv: parallel agents often run `unienv need` at once."""
     UNIENV_HOME.mkdir(parents=True, exist_ok=True)
-    # Keep the lock outside the install tree so Windows can purge it while locked.
-    lock_path = UNIENV_HOME.parent / ("." + UNIENV_HOME.name + ".lock")
+    # Keep the lock outside the install tree on Windows so `--purge` can remove UNIENV_HOME while locked.
+    lock_path = UNIENV_HOME.parent / ("." + UNIENV_HOME.name + ".lock") if IS_WIN else UNIENV_HOME / ".lock"
     with open(lock_path, "a+b") as f:
         if IS_WIN:
             import msvcrt
@@ -858,6 +858,9 @@ def write_shims() -> None:
             f'copy /y "{Path(__file__).resolve()}" "%TEMP%\\unienv-uninstall.py" >nul\r\n'
             '> "%TEMP%\\unienv-uninstall.cmd" echo @echo off\r\n'
             f'>> "%TEMP%\\unienv-uninstall.cmd" echo "{sys.executable}" "%%TEMP%%\\unienv-uninstall.py" %%*\r\n'
+            '>> "%TEMP%\\unienv-uninstall.cmd" echo set "RC=%%ERRORLEVEL%%"\r\n'
+            '>> "%TEMP%\\unienv-uninstall.cmd" echo del /f /q "%%TEMP%%\\unienv-uninstall.py" 2^>nul\r\n'
+            '>> "%TEMP%\\unienv-uninstall.cmd" echo (goto) 2^>nul ^& del /f /q "%%~f0" ^& exit /b %%RC%%\r\n'
             '"%TEMP%\\unienv-uninstall.cmd" %*\r\n'
         )
         (BIN / "unienv.cmd").write_text(cli_cmd, newline="")
@@ -1373,7 +1376,7 @@ def _verify_python_imports(recipes: list[dict]) -> dict[str, str]:
     imports = uniq([m for r in recipes for m in r.get("python", {}).get("imports", [])])
     if not imports:
         return {}
-    py = PY_DIR / ".venv/bin/python"
+    py = venv_python()
     if not py.exists():
         return {"python": "shared Python env missing"}
     code = (
@@ -2344,6 +2347,7 @@ def main(argv: list[str] | None = None) -> int:
                     *argv[1:],
                 ],
                 check=False,
+                quiet=True,
             ).returncode
     p = argparse.ArgumentParser(
         prog="unienv",

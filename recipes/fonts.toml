@@ -17,7 +17,7 @@ winget = []
 scoop = []
 
 [system.fedora]
-dnf = ["google-carlito-fonts", "sil-caladea-fonts", "liberation-fonts", "google-noto-sans-cjk-fonts"]
+dnf = ["google-carlito-fonts", "google-crosextra-caladea-fonts", "liberation-fonts-all", "google-noto-sans-cjk-fonts"]
 
 [system.arch]
 pacman = ["ttf-carlito", "ttf-caladea", "ttf-liberation", "noto-fonts-cjk"]
