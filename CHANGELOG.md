@@ -5,7 +5,7 @@ All notable changes to UniEnv AI are documented here. The format follows [Keep a
 ## [Unreleased]
 
 ### Fixed
-- Report alias probe timeouts in doctor, allow 15 seconds for shell startup, and avoid sourcing bashrc twice. Live alias IDs use alias:zsh:name or alias:bash:name. (#22)
+- Remove stale generated shims on the first upgrade, preserve user files, and prune old backups once per sync or package addition. (#38)
 
 ### Security
 - Add MCP readonly and folder restrictions, disable arbitrary execution under roots, protect dangling output symlinks, sandbox Pandoc conversions, and expose policy settings in the Desktop extension. (#33)
