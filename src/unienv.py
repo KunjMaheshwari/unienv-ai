@@ -1210,9 +1210,28 @@ def _mcp_client_installed(name: str, path: Path) -> bool:
     return path.exists() or path.parent.exists()
 
 
-def mcp_entry() -> dict:
+def mcp_entry(client: str | None = None) -> dict:
     # absolute path: GUI apps start servers with a minimal PATH (the `spawn ENOENT` bug class)
-    return {"command": str(BIN / "unienv"), "args": ["mcp"]}
+    entry: dict = {"command": str(BIN / "unienv"), "args": ["mcp"]}
+    if client == "vscode":
+        return {"type": "stdio", **entry}
+    return entry
+
+
+def _zed_has_comments(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if not re.search(r"(^|\s)//|/\*", raw, re.M):
+        return False
+    try:
+        json.loads(raw)
+        return False
+    except json.JSONDecodeError:
+        return True
 
 
 def _load_json(path: Path) -> dict:
@@ -1271,7 +1290,8 @@ def cmd_mcp(args) -> int:
         return unienv_mcp.serve()
     if args.action == "config":
         root_key = mcp_client_key(args.client) if args.client != "all" else "mcpServers"
-        print(json.dumps({root_key: {"unienv": mcp_entry()}}, indent=2))
+        entry_client = args.client if args.client != "all" else None
+        print(json.dumps({root_key: {"unienv": mcp_entry(entry_client)}}, indent=2))
         return 0
     clients = mcp_clients()
     targets = list(clients) if args.client == "all" else [args.client]
@@ -1285,8 +1305,13 @@ def cmd_mcp(args) -> int:
             and not _mcp_client_installed(name, path)
         ):
             continue  # only touch clients that are actually installed
+        if name == "zed" and _zed_has_comments(path):
+            if args.action == "install":
+                info(f"  i {path} contains comments; paste this snippet into Zed (`unienv mcp config --client zed`):")
+                print(json.dumps({mcp_client_key("zed"): {"unienv": mcp_entry("zed")}}, indent=2))
+            continue
         try:
-            changed = mcp_set(path, mcp_entry() if args.action == "install" else None, key=mcp_client_key(name))
+            changed = mcp_set(path, mcp_entry(name) if args.action == "install" else None, key=mcp_client_key(name))
         except SystemExit:
             failed = True
             warn(f"skipped {name}: fix its JSON configuration and retry")
@@ -1548,6 +1573,8 @@ def cmd_doctor(args) -> int:
             raw = p.read_text(encoding="utf-8", errors="replace").strip()
             data = json.loads(raw) if raw else {}
         except (OSError, json.JSONDecodeError):
+            if n == "zed" and _zed_has_comments(p):
+                continue
             add(f"mcp:{n}", "warn", f"{p} is not valid JSON; can't check the unienv entry")
             continue
         if not isinstance(data, dict):
@@ -1730,6 +1757,8 @@ def cmd_uninstall(args) -> int:
                 warn(f"could not remove {a['skills'] / 'unienv'} ({e})")
     # desktop apps would otherwise keep trying to start a server that no longer exists
     for name, path in mcp_clients().items():
+        if name == "zed" and _zed_has_comments(path):
+            continue
         try:
             if mcp_set(path, None, key=mcp_client_key(name)):
                 info(f"  removed the unienv MCP server from {name} ({path})")

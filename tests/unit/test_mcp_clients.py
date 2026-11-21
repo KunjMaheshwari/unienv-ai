@@ -51,16 +51,44 @@ class McpClientsTests(unittest.TestCase):
             claude.write_bytes(b'{"session":"leave unchanged"}')
             cursor = home / ".cursor/mcp.json"
             cursor.parent.mkdir()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
             with (
                 patch.object(u, "HOME", home),
+                patch.object(u, "UNIENV_HOME", home),
+                patch.object(u, "BIN", home / "bin"),
+                patch.object(u, "PY_DIR", home / "py"),
+                patch.object(u, "MANIFEST_FILE", home / "manifest.json"),
                 patch.object(u, "IS_MAC", False),
                 patch.object(u, "LOG_FILE", home / "log"),
-                contextlib.redirect_stdout(io.StringIO()),
-                contextlib.redirect_stderr(io.StringIO()),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
             ):
-                self.assertEqual(u.cmd_mcp(argparse.Namespace(action="install", client="all")), 1)
+                self.assertEqual(u.cmd_mcp(argparse.Namespace(action="install", client="all")), 0)
+                self.assertIn("context_servers", stdout.getvalue())
+                self.assertIn("unienv mcp config --client zed", stdout.getvalue())
                 self.assertIn("unienv", json.loads(cursor.read_text())["mcpServers"])
-                self.assertEqual(u.cmd_mcp(argparse.Namespace(action="uninstall", client="all")), 1)
+                self.assertEqual(u.cmd_mcp(argparse.Namespace(action="uninstall", client="all")), 0)
+                self.assertEqual(stderr.getvalue(), "")
+
+                # Doctor also skips commented Zed settings quietly without warning
+                (home / "manifest.json").write_text("{}")
+                doc_out = io.StringIO()
+                with (
+                    patch.object(u, "load_recipes", return_value={}),
+                    patch.object(u, "load_state", return_value={"options": {"exclude": []}}),
+                    patch.object(u, "active_recipes", return_value=[]),
+                    patch.object(u, "wanted", return_value={"node": [], "bins": [], "skipped_bins": []}),
+                    patch.object(u, "node_packages", return_value={}),
+                    patch.object(u, "agent_targets", return_value=[]),
+                    patch.object(u, "brew_prefix", return_value=None),
+                    patch.object(u, "render_agent_block", return_value=""),
+                    patch.object(u, "_clean_shell_probe", return_value=str(home / "bin/ue-py")),
+                    contextlib.redirect_stdout(doc_out),
+                ):
+                    u.cmd_doctor(argparse.Namespace(json=True, fix=False, quiet_ok=False))
+                report = json.loads(doc_out.getvalue())
+                self.assertNotIn("mcp:zed", {c["id"] for c in report["checks"]})
             self.assertEqual(zed.read_bytes(), raw)
             self.assertEqual(claude.read_bytes(), b'{"session":"leave unchanged"}')
 
@@ -93,7 +121,9 @@ class McpClientsTests(unittest.TestCase):
                 data = json.loads(cfg_path.read_text())
                 self.assertEqual(data["extra"], True)
                 self.assertEqual(data[key]["existing"], {"command": "other"})
-                self.assertEqual(data[key]["unienv"], u.mcp_entry())
+                self.assertEqual(data[key]["unienv"], u.mcp_entry(client_name))
+                if client_name == "vscode":
+                    self.assertEqual(data[key]["unienv"]["type"], "stdio")
                 backups = list(cfg_path.parent.glob(cfg_path.name + ".unienv-backup-*"))
                 self.assertTrue(backups, f"expected backup for {client_name}")
 

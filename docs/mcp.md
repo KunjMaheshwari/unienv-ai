@@ -40,7 +40,7 @@ unienv mcp install --client all         # every supported app that's installed
 
 This merges a `unienv` entry into the app's MCP config (a timestamped backup is made first) using **absolute paths**, so it works even though desktop apps start with a minimal PATH. **Quit the app fully and reopen it.**
 
-Zed settings that contain comments or other non-JSON syntax are preserved and skipped with a diagnostic; other clients are still configured. Zed's current custom-server schema uses command, args and env under context_servers (https://zed.dev/docs/ai/mcp). Claude Code uses UniEnv through the shell; its frequently rewritten ~/.claude.json state file is never edited by these commands.
+Zed settings that contain `//` or `/* */` comments are preserved: `unienv mcp install` prints the `unienv mcp config --client zed` snippet to paste manually, and `doctor` and `uninstall` skip the file quietly. Zed's current custom-server schema uses `command`, `args` and `env` under `context_servers` (https://zed.dev/docs/ai/mcp), and VS Code's `mcp.json` uses `"type": "stdio"` under `servers`. Claude Code uses UniEnv through the shell; its frequently rewritten `~/.claude.json` state file is never edited by these commands.
 
 ### Option B: Claude Desktop Extension (one click)
 
