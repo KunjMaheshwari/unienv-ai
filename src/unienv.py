@@ -999,16 +999,25 @@ def _spec_satisfied(
             iv = _ver_tuple(installed)
             if iv is None:
                 return None, installed
-            full = tuple(int(n) for n in installed.split("."))
-            return full[: len(prefix)] == prefix, installed
+            padded = iv + (0,) * max(0, len(prefix) - len(iv))
+            return padded[: len(prefix)] == prefix, installed
+        clauses = [c.strip() for c in ver.split() if c.strip()]
         matches = []
-        for clause in (c.strip() for c in ver.split() if c.strip()):
+        for clause in clauses:
             cm = re.fullmatch(r"(\^|~|>=|<=|>|<|=)?\s*(\d+(?:\.\d+)*)", clause)
-            matches.append(_version_matches(installed, cm.group(1) or "==", cm.group(2)) if cm else None)
+            if not cm:
+                matches.append(None)
+                continue
+            op = cm.group(1) or "=="
+            ver_str = cm.group(2)
+            n_parts = len(ver_str.split("."))
+            if n_parts != 3 and not (op == "~" and n_parts == 2 and len(clauses) == 1):
+                matches.append(None)
+            else:
+                matches.append(_version_matches(installed, op, ver_str))
         if None in matches:
             return None, installed
         return all(matches), installed
-        return True, installed
     return True, manifest_pkgs.get(spec)
 
 
