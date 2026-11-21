@@ -718,7 +718,15 @@ def write_shims() -> None:
             f'''@echo off\r\nset "NODE_PATH={UNIENV_HOME / "node" / "node_modules"};%NODE_PATH%"\r\n"{node}" %*\r\n''',
             newline="",
         )
-        cli_cmd = f'@echo off\r\nset PYTHONUTF8=1\r\n"{sys.executable}" "{Path(__file__).resolve()}" %* & exit /b\r\n'
+        cli_cmd = (
+            "@echo off\r\n"
+            "set PYTHONUTF8=1\r\n"
+            f'if /i not "%~1"=="uninstall" "{sys.executable}" "{Path(__file__).resolve()}" %* & exit /b\r\n'
+            f'copy /y "{Path(__file__).resolve()}" "%TEMP%\\unienv-uninstall.py" >nul\r\n'
+            '> "%TEMP%\\unienv-uninstall.cmd" echo @echo off\r\n'
+            f'>> "%TEMP%\\unienv-uninstall.cmd" echo "{sys.executable}" "%%TEMP%%\\unienv-uninstall.py" %%*\r\n'
+            '"%TEMP%\\unienv-uninstall.cmd" %*\r\n'
+        )
         (BIN / "unienv.cmd").write_text(cli_cmd, newline="")
         (BIN / "ue.cmd").write_text(cli_cmd, newline="")
         wrappers = {
