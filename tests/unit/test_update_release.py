@@ -159,7 +159,10 @@ class UpdateReleaseTests(unittest.TestCase):
             with (
                 patch.object(u, "UNIENV_HOME", home),
                 patch.object(u, "_latest_release_tag", return_value="v0.3.0"),
-                patch.object(u, "_fetch_release_sha256", return_value=None),
+                patch(
+                    "urllib.request.urlopen",
+                    return_value=contextlib.nullcontext(io.BytesIO(b"")),
+                ),
                 contextlib.redirect_stdout(io.StringIO()),
                 contextlib.redirect_stderr(err2),
             ):

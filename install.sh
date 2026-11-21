@@ -79,7 +79,7 @@ if [ -z "$REPO" ] || [ ! -f "$REPO/src/unienv.py" ]; then
       fi
       ;;
     *)
-      curl -fsSL "https://github.com/rupeshbharambe24/unienv-ai/archive/refs/heads/$REF.tar.gz" > "$ARCHIVE"
+      curl -fsSL "https://github.com/rupeshbharambe24/unienv-ai/archive/$REF.tar.gz" > "$ARCHIVE"
       ;;
   esac
   tar -xzf "$ARCHIVE" -C "$TMP_SRC" --strip-components=1

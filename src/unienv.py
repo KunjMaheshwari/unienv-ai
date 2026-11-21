@@ -221,6 +221,10 @@ def _write_block_text(path: Path, text: str, eol: str) -> None:
         f.write(text.replace("\n", eol))
 
 
+def _block_layout_marker(begin: str) -> str:
+    return "# unienv:restore-no-final-newline" if begin.startswith("#") else "<!-- unienv:restore-no-final-newline -->"
+
+
 def _has_malformed_block(text: str, begin: str, end: str) -> bool:
     """True when begin/end markers are unbalanced or orphaned."""
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -238,21 +242,25 @@ def _has_malformed_block(text: str, begin: str, end: str) -> bool:
 
 
 def upsert_block(path: Path, body: str, begin: str, end: str, *, top: bool = False) -> bool:
-    """Insert or replace a marked block. Returns True if the file changed."""
+    """Insert or replace a block without losing the surrounding file's layout."""
     old, eol = _read_block_text(path) if path.exists() else ("", os.linesep)
     if _has_malformed_block(old, begin, end):
         warn(
             f"{path} has an incomplete UniEnv block (missing end marker); fix or remove the orphaned marker line first"
         )
         return False
-    block = f"{begin}\n{body.rstrip()}\n{end}\n"
-    pattern = re.compile(re.escape(begin) + r".*?" + re.escape(end) + r"\n?", re.S)
-    if pattern.search(old):
+    pattern = re.compile(re.escape(begin) + r"\n.*?" + re.escape(end) + r"(?:\n|$)", re.S)
+    match = pattern.search(old)
+    marker = _block_layout_marker(begin)
+    restore_eof = marker in match.group(0).splitlines() if match else bool(old and not top and not old.endswith("\n"))
+    prefix = marker + "\n" if restore_eof else ""
+    block = f"{begin}\n{prefix}{body.rstrip()}\n{end}\n"
+    if match:
         new = pattern.sub(lambda _: block, old, count=1)
     elif top:
-        new = block + ("\n" + old if old else "")
+        new = block + old
     else:
-        new = old + ("\n" if old and not old.endswith("\n") else "") + ("\n" if old else "") + block
+        new = old + ("\n" if restore_eof else "") + block
     if new == old:
         return False
     _write_block_text(path, new, eol)
@@ -268,8 +276,18 @@ def remove_block(path: Path, begin: str, end: str) -> bool:
             f"{path} has an incomplete UniEnv block (missing end marker); fix or remove the orphaned marker line first"
         )
         return False
-    new = re.sub(r"\n?" + re.escape(begin) + r".*?" + re.escape(end) + r"\n?", "\n", old, flags=re.S)
-    new = new.strip("\n") + ("\n" if new.strip() else "")
+    pattern = re.compile(re.escape(begin) + r"\n.*?" + re.escape(end) + r"(?:\n|$)", re.S)
+    new = old
+    for match in reversed(list(pattern.finditer(old))):
+        start = match.start()
+        if (
+            _block_layout_marker(begin) in match.group(0).splitlines()
+            and match.end() == len(old)
+            and start
+            and old[start - 1] == "\n"
+        ):
+            start -= 1
+        new = new[:start] + new[match.end() :]
     if new == old:
         return False
     _write_block_text(path, new, eol)
@@ -311,7 +329,11 @@ def read_block(path: Path, begin: str, end: str) -> str | None:
     if _has_malformed_block(text, begin, end):
         return None
     m = re.search(re.escape(begin) + r"\n(.*?)\n" + re.escape(end), text, re.S)
-    return m.group(1) if m else None
+    if not m:
+        return None
+    body = m.group(1)
+    prefix = _block_layout_marker(begin) + "\n"
+    return body[len(prefix) :] if body.startswith(prefix) else body
 
 
 # ── recipes & state ─────────────────────────────────────────────────────────
@@ -1648,19 +1670,18 @@ def cmd_update(args) -> int:
                 "pass `unienv update --ref main` to install from main without release verification"
             )
     is_release = not explicit_ref or _is_release_tag(ref)
-    expected_sha = getattr(args, "sha256", None)
+    explicit_sha = getattr(args, "sha256", None)
+    expected_sha = explicit_sha
     if not expected_sha and is_release:
         expected_sha = _fetch_release_sha256(ref)
-        if not expected_sha:
-            die(
-                f"could not fetch or verify SHA256SUMS for release {ref!r}; "
-                "pass `--sha256 <digest>` or `--ref main` to override"
-            )
+    if not is_release and not expected_sha:
+        warn(f"installing {ref} without checksum verification")
 
     no_wire = getattr(args, "no_wire", False) or not load_state(load_recipes()).get("options", {}).get(
         "wire_shells", True
     )
-    url = RELEASE_TARBALL.format(ref=ref) if is_release else REPO_TARBALL.format(ref=ref)
+    use_release_asset = is_release and not explicit_sha
+    url = RELEASE_TARBALL.format(ref=ref) if use_release_asset else REPO_TARBALL.format(ref=ref)
     step(f"Downloading {url}")
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "unienv.tar.gz"
@@ -1703,8 +1724,12 @@ def cmd_update(args) -> int:
                 prev_share.rename(share)
                 old_cli = share / "src/unienv.py"
                 if old_cli.exists():
-                    with contextlib.suppress(BaseException):
-                        subprocess.call([sys.executable, str(old_cli), *install_args])
+                    try:
+                        restore_rc = subprocess.call([sys.executable, str(old_cli), *install_args])
+                        if restore_rc != 0:
+                            warn(f"rollback restore exited with code {restore_rc}; run unienv install to repair")
+                    except BaseException as restore_err:
+                        warn(f"rollback restore failed ({restore_err}); run unienv install to repair")
             if not isinstance(e, Exception):
                 raise
             return 1
