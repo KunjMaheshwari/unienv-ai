@@ -185,6 +185,53 @@ class SandboxProfileTests(unittest.TestCase):
                 self.assertEqual(rc, 0)
                 self.assertIn("could not read sandbox state", err.getvalue())
 
+    def test_dotted_key_codex_config_is_refused_and_left_byte_identical(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            cfg = root / ".codex/config.toml"
+            cfg.parent.mkdir(parents=True)
+            original = b'sandbox_workspace_write.writable_roots = ["/tmp/work"]\n'
+            cfg.write_bytes(original)
+            with (
+                patch.object(u, "HOME", root),
+                patch.object(u, "UNIENV_HOME", root / ".unienv"),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaises(SystemExit) as cm:
+                    u._install_codex_sandbox(cfg)
+            self.assertEqual(cm.exception.code, 1)
+            self.assertEqual(cfg.read_bytes(), original)
+
+    def test_codex_crlf_line_endings_are_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            cfg = root / ".codex/config.toml"
+            cfg.parent.mkdir(parents=True)
+            cfg.write_bytes(b'model = "o3"\r\n[sandbox_workspace_write]\r\nwritable_roots = ["/tmp/a"]\r\n')
+            with (
+                patch.object(u, "HOME", root),
+                patch.object(u, "UNIENV_HOME", root / ".unienv"),
+            ):
+                self.assertTrue(u._install_codex_sandbox(cfg))
+            self.assertIn(b"\r\n", cfg.read_bytes())
+
+    def test_sandbox_install_all_skips_undetected_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            out = io.StringIO()
+            with (
+                patch.object(u, "HOME", root),
+                patch.object(u, "UNIENV_HOME", root / ".unienv"),
+                patch.object(u, "which", return_value=None),
+                patch.dict(os.environ, {"CODEX_HOME": str(root / ".codex")}),
+                contextlib.redirect_stdout(out),
+            ):
+                rc = u.cmd_sandbox(argparse.Namespace(action="install", tool="all"))
+            self.assertEqual(rc, 0)
+            self.assertFalse((root / ".claude").exists())
+            self.assertFalse((root / ".codex").exists())
+            self.assertIn("skipped (not detected)", out.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

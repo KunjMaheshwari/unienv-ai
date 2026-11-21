@@ -2168,34 +2168,60 @@ def _sandbox_state() -> tuple[Path, dict]:
     return path, _sandbox_load(path, "claude")
 
 
-def _write_preserving_link_and_mode(path: Path, text: str) -> None:
+def _read_text_with_eol(path: Path) -> tuple[str, str]:
+    if not path.exists():
+        return "", "\n"
+    with path.open("r", encoding="utf-8", newline="") as f:
+        raw = f.read()
+    eol = "\r\n" if "\r\n" in raw else "\n"
+    return raw.replace("\r\n", "\n"), eol
+
+
+def _write_preserving_link_and_mode(path: Path, text: str, *, eol: str = "\n") -> None:
     target = Path(os.path.realpath(path)) if path.is_symlink() else path
     mode = (target.stat().st_mode & 0o7777) if target.exists() else None
     target.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(target, text)
-    if mode is not None:
-        with contextlib.suppress(OSError):
-            target.chmod(mode)
+    tmp = target.parent / f".{target.name}.tmp.{os.getpid()}"
+    data = text.replace("\n", eol).encode("utf-8")
+    try:
+        tmp.write_bytes(data)
+        if mode is not None:
+            with contextlib.suppress(OSError):
+                tmp.chmod(mode)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
-def _sandbox_write(path: Path, data: dict, tool: str, *, raw_text: str | None = None) -> None:
+def _sandbox_write(
+    path: Path,
+    data: dict,
+    tool: str,
+    *,
+    raw_text: str | None = None,
+    action: str = "install",
+    eol: str = "\n",
+) -> None:
     if tool == "codex":
         text = raw_text if raw_text is not None else _toml_text(data)
+        hint = (
+            f"remove {UNIENV_HOME} from writable_roots manually"
+            if action == "uninstall"
+            else f"add this snippet manually:\n{sandbox_profile('codex')}"
+        )
         try:
             parsed = tomllib.loads(text)
         except ValueError as exc:
-            die(f"cannot safely edit {path} ({exc}); add this snippet manually:\n{sandbox_profile('codex')}")
+            die(f"cannot safely edit {path} ({exc}); {hint}")
         if parsed != data:
-            die(
-                f"cannot safely update {path} without altering existing tables; add this snippet manually:\n"
-                f"{sandbox_profile('codex')}"
-            )
+            die(f"cannot safely update {path} without altering existing tables; {hint}")
     else:
         text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     if path.exists():
         backup = path.with_name(path.name + f".unienv-backup-{_dt.datetime.now():%Y%m%d-%H%M%S-%f}")
         shutil.copy2(path, backup)
-    _write_preserving_link_and_mode(path, text)
+    _write_preserving_link_and_mode(path, text, eol=eol)
 
 
 def _sandbox_fields(tool: str) -> dict[tuple[str, ...], list[str]]:
@@ -2210,7 +2236,7 @@ def _sandbox_fields(tool: str) -> dict[tuple[str, ...], list[str]]:
 
 
 def _install_sandbox(path: Path, tool: str) -> bool:
-    raw = path.read_text(encoding="utf-8") if path.exists() else ""
+    raw, eol = _read_text_with_eol(path)
     data = _sandbox_load(path, tool)
     state_path, state = _sandbox_state()
     key = str(path.resolve())
@@ -2242,7 +2268,7 @@ def _install_sandbox(path: Path, tool: str) -> bool:
     raw_text = (
         _edit_codex_sandbox_toml(raw, data["sandbox_workspace_write"]["writable_roots"]) if tool == "codex" else None
     )
-    _sandbox_write(path, data, tool, raw_text=raw_text)
+    _sandbox_write(path, data, tool, raw_text=raw_text, action="install", eol=eol)
     state[key] = record
     state_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(state_path, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
@@ -2252,13 +2278,14 @@ def _install_sandbox(path: Path, tool: str) -> bool:
 def _uninstall_sandbox() -> None:
     try:
         state_path, state = _sandbox_state()
-    except (OSError, ValueError, SystemExit) as exc:
-        warn(f"could not read sandbox state: {exc}")
+    except (Exception, SystemExit) as exc:
+        detail = "" if isinstance(exc, SystemExit) else f": {exc}"
+        warn(f"could not read sandbox state{detail}")
         return
     for key, record in list(state.items()):
         path = Path(key)
         try:
-            raw = path.read_text(encoding="utf-8") if path.exists() else ""
+            raw, eol = _read_text_with_eol(path)
             data = _sandbox_load(path, record["tool"])
             for dotted, items in record["added"].items():
                 fields = dotted.split(".")
@@ -2291,10 +2318,11 @@ def _uninstall_sandbox() -> None:
                             desired_roots,
                             remove_table_if_empty=["sandbox_workspace_write"] in record["created"],
                         )
-                    _sandbox_write(path, data, record["tool"], raw_text=raw_text)
+                    _sandbox_write(path, data, record["tool"], raw_text=raw_text, action="uninstall", eol=eol)
             del state[key]
-        except (OSError, ValueError, SystemExit) as exc:
-            warn(f"could not remove sandbox settings from {path}: {exc}")
+        except (Exception, SystemExit) as exc:
+            detail = "" if isinstance(exc, SystemExit) else f": {exc}"
+            warn(f"could not remove sandbox settings from {path}{detail}")
     if state:
         atomic_write(state_path, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
     elif state_path.exists():
@@ -2324,6 +2352,9 @@ def cmd_sandbox(args) -> int:
             if tool == "claude"
             else Path(os.environ.get("CODEX_HOME", HOME / ".codex")) / "config.toml"
         )
+        if args.tool == "all" and not path.parent.exists() and not which(tool):
+            info(f"  {tool}: skipped (not detected)")
+            continue
         changed = _install_sandbox(path, tool)
         info(f"  {tool}: {'updated' if changed else 'already configured'} ({path})")
         if tool == "codex":
