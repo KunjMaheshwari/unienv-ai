@@ -505,10 +505,6 @@ def write_package_json(packages: list[str]) -> None:
 
 def install_node(packages: list[str]) -> None:
     if not packages:
-        if (NODE_DIR / "package.json").exists():
-            write_package_json([])
-            shutil.rmtree(NODE_DIR / "node_modules", ignore_errors=True)
-            (NODE_DIR / "package-lock.json").unlink(missing_ok=True)
         return
     npm = which("npm")
     if not npm:
@@ -1013,20 +1009,27 @@ def cmd_remove(args) -> int:
     removed = [p for p in state["extras"][kind] if key(p) in remove_keys]
     state["extras"][kind] = [p for p in state["extras"][kind] if key(p) not in remove_keys]
     w = wanted(recipes, state)
+    still_wanted = {key(x) for x in w[kind]}
+    to_uninstall = [p for p in removed if key(p) not in still_wanted]
     try:
         if kind == "python":
             install_python(w["python"])
         elif kind == "node":
-            install_node(w["node"])
-        elif kind in ("brew", "cask"):
+            if w["node"]:
+                install_node(w["node"])
+            elif (NODE_DIR / "package.json").exists():
+                write_package_json([])
+                shutil.rmtree(NODE_DIR / "node_modules", ignore_errors=True)
+                (NODE_DIR / "package-lock.json").unlink(missing_ok=True)
+        elif kind in ("brew", "cask") and to_uninstall:
             brew = which("brew")
-            cmd = [brew or "brew", "uninstall", *(["--cask"] if kind == "cask" else []), *removed]
+            cmd = [brew or "brew", "uninstall", *(["--cask"] if kind == "cask" else []), *to_uninstall]
             if args.yes and brew:
                 run(cmd)
             else:
                 info(f"  removed from UniEnv extras; to also uninstall from Homebrew, run: {' '.join(cmd)}")
-        elif kind == "apt":
-            cmd = ["sudo", "apt-get", "remove", "-y", *removed]
+        elif kind == "apt" and to_uninstall:
+            cmd = ["sudo", "apt-get", "remove", "-y", *to_uninstall]
             if args.yes or os.geteuid() == 0:
                 run(cmd[1:] if os.geteuid() == 0 else cmd)
             else:

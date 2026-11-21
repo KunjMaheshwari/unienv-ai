@@ -162,6 +162,29 @@ class RemoveTests(unittest.TestCase):
             self.assertEqual(run_calls, [["/opt/homebrew/bin/brew", "uninstall", "jq"]])
             self.assertEqual(json.loads(u.STATE_FILE.read_text())["extras"]["brew"], [])
 
+    def test_remove_bin_does_not_uninstall_package_still_needed_by_active_battery(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+            self._setup_home(stack, tmp)
+            recipes = u.load_recipes()
+            state = u.default_state(recipes)
+            state["batteries"] = ["media"]
+            state["extras"]["brew"] = ["ffmpeg"]
+            u.save_state(state)
+
+            run_calls = []
+            stack.enter_context(patch.object(u, "platform_key", return_value="macos"))
+            stack.enter_context(patch.object(u, "which", return_value="/opt/homebrew/bin/brew"))
+            stack.enter_context(patch.object(u, "run", side_effect=lambda cmd, **kw: run_calls.append(cmd)))
+            stack.enter_context(patch.object(u, "do_sync", return_value={}))
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = u.cmd_remove(argparse.Namespace(packages=["ffmpeg"], node=False, bin=True, cask=False, yes=True))
+            self.assertEqual(rc, 0)
+            self.assertEqual(run_calls, [])
+            self.assertNotIn("brew uninstall", out.getvalue())
+            self.assertEqual(json.loads(u.STATE_FILE.read_text())["extras"]["brew"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
