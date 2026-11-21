@@ -5,14 +5,20 @@ class Unienv < Formula
   sha256 "REPLACE_WITH_RELEASE_SHA256"
   license "MIT"
 
-  depends_on "python@3.12"
   depends_on "uv"
 
   def install
     libexec.install "src", "recipes", "templates", "shims"
     (bin/"unienv").write <<~EOS
       #!/bin/sh
-      exec "#{Formula["python@3.12"].opt_bin}/python3.12" "#{libexec}/src/unienv.py" "$@"
+      set -e
+      UV="#{Formula["uv"].opt_bin}/uv"
+      PY="$("$UV" python find 3.12 --managed-python 2>/dev/null || true)"
+      if [ -z "$PY" ]; then
+        "$UV" python install 3.12 --quiet
+        PY="$("$UV" python find 3.12 --managed-python)"
+      fi
+      exec "$PY" "#{opt_libexec}/src/unienv.py" "$@"
     EOS
     chmod 0755, bin/"unienv"
     bin.install_symlink "unienv" => "ue"

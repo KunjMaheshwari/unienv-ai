@@ -18,6 +18,9 @@ class HomebrewUpdateTests(unittest.TestCase):
     def test_is_homebrew_install_detects_cellar_path(self):
         with patch.object(u, "__file__", "/opt/homebrew/Cellar/unienv/0.2.2/libexec/src/unienv.py"):
             self.assertTrue(u._is_homebrew_install())
+            self.assertEqual(u._cli_script_path(), pathlib.Path("/opt/homebrew/opt/unienv/libexec/src/unienv.py"))
+        with patch.object(u, "__file__", "/opt/homebrew/opt/unienv/libexec/src/unienv.py"):
+            self.assertTrue(u._is_homebrew_install())
         with patch.object(u, "__file__", "/Users/alice/.unienv/share/src/unienv.py"):
             self.assertFalse(u._is_homebrew_install())
 
@@ -35,6 +38,9 @@ class HomebrewUpdateTests(unittest.TestCase):
         formula = (ROOT / "Formula" / "unienv.rb").read_text()
         self.assertIn("class Unienv < Formula", formula)
         self.assertIn('depends_on "uv"', formula)
+        self.assertNotIn('depends_on "python@3.12"', formula)
+        self.assertIn("python find 3.12 --managed-python", formula)
+        self.assertIn('#{opt_libexec}/src/unienv.py', formula)
         self.assertIn('libexec.install "src", "recipes", "templates", "shims"', formula)
         self.assertIn("unienv install", formula)
 

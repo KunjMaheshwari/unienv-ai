@@ -28,3 +28,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$GITHUB_REF_NAME" dist/unienv.mcpb dist/unienv.rb --clobber || gh release create "$GITHUB_REF_NAME" dist/unienv.mcpb dist/unienv.rb --generate-notes
+      - name: Update Homebrew tap (when HOMEBREW_TAP_TOKEN is configured)
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/rupeshbharambe24/homebrew-unienv.git" /tmp/homebrew-unienv
+          mkdir -p /tmp/homebrew-unienv/Formula
+          cp dist/unienv.rb /tmp/homebrew-unienv/Formula/unienv.rb
+          cd /tmp/homebrew-unienv
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/unienv.rb
+          git diff --cached --quiet || (git commit -m "unienv ${GITHUB_REF_NAME}" && git push origin HEAD)

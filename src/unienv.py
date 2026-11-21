@@ -520,6 +520,13 @@ def install_node(packages: list[str]) -> None:
 # ── generated files: shims, env.sh, manifest, agent files ───────────────────
 
 
+def _cli_script_path() -> Path:
+    """Return a stable script path across Homebrew upgrades (rewriting Cellar/<ver> to opt/unienv)."""
+    p = Path(__file__).resolve()
+    m = re.match(r"^(.+)/Cellar/unienv/[^/]+/libexec/(.+)$", p.as_posix())
+    return Path(f"{m.group(1)}/opt/unienv/libexec/{m.group(2)}") if m else p
+
+
 def write_shims() -> None:
     BIN.mkdir(parents=True, exist_ok=True)
     node = which("node") or "node"
@@ -533,7 +540,7 @@ def write_shims() -> None:
     # the CLI itself: always run with the interpreter that is running us now
     # (a uv-managed 3.12, never Homebrew's python), so it survives env breakage
     cli = BIN / "unienv"
-    cli.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{Path(__file__).resolve()}" "$@"\n')
+    cli.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{_cli_script_path()}" "$@"\n')
     cli.chmod(0o755)
     ue = BIN / "ue"
     if ue.is_symlink() or ue.exists():
@@ -1128,7 +1135,8 @@ def mcp_handshake(timeout: float = 15) -> tuple[bool, str, float]:
 
 
 def _is_homebrew_install() -> bool:
-    return "/Cellar/unienv/" in Path(__file__).resolve().as_posix()
+    posix = Path(__file__).resolve().as_posix()
+    return "/Cellar/unienv/" in posix or "/opt/unienv/libexec/" in posix
 
 
 def cmd_update(args) -> int:
