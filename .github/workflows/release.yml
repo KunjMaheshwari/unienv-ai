@@ -12,6 +12,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Verify release tag matches version strings
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, "src")
+          import unienv, unienv_mcp
+          manifest = json.loads(open("mcpb/manifest.json").read())
+          versions = {
+              "src/unienv.py:VERSION": f"v{unienv.VERSION}",
+              "src/unienv_mcp.py:SERVER_VERSION": f"v{unienv_mcp.SERVER_VERSION}",
+              "mcpb/manifest.json:version": f"v{manifest['version']}",
+          }
+          tag = os.environ["GITHUB_REF_NAME"]
+          mismatches = {k: v for k, v in versions.items() if v != tag}
+          if mismatches:
+              raise SystemExit(f"Tag {tag!r} does not match hardcoded versions: {mismatches}")
+          print(f"Verified all versions match tag {tag}")
+          PY
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests/unit -v
       - name: Build the Claude Desktop Extension
         run: |
           scripts/build-mcpb.sh

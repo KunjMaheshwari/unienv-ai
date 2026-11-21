@@ -140,7 +140,7 @@ class RemoveTests(unittest.TestCase):
             self._setup_home(stack, tmp)
             recipes = u.load_recipes()
             state = u.default_state(recipes)
-            state["extras"]["brew"] = ["htop", "jq"]
+            state["extras"]["brew"] = ["htop", "wget"]
             u.save_state(state)
 
             run_calls = []
@@ -157,9 +157,9 @@ class RemoveTests(unittest.TestCase):
             self.assertIn("brew uninstall htop", out.getvalue())
 
             with contextlib.redirect_stdout(io.StringIO()):
-                rc2 = u.cmd_remove(argparse.Namespace(packages=["jq"], node=False, bin=True, cask=False, yes=True))
+                rc2 = u.cmd_remove(argparse.Namespace(packages=["wget"], node=False, bin=True, cask=False, yes=True))
             self.assertEqual(rc2, 0)
-            self.assertEqual(run_calls, [["/opt/homebrew/bin/brew", "uninstall", "jq"]])
+            self.assertEqual(run_calls, [["/opt/homebrew/bin/brew", "uninstall", "wget"]])
             self.assertEqual(json.loads(u.STATE_FILE.read_text())["extras"]["brew"], [])
 
     def test_remove_bin_does_not_uninstall_package_still_needed_by_active_battery(self):
