@@ -42,11 +42,11 @@ For cloud coding agents (Codex cloud, GitHub Copilot coding agent, containerized
   docker build -t unienv-ai .
   docker run --rm -it unienv-ai unienv status
   ```
-- **Dev Container Feature (`.devcontainer/unienv`)**: Published on each release tag to GHCR (`ghcr.io/rupeshbharambe24/unienv/unienv:0`) and pinned to the matching UniEnv release tag:
+- **Dev Container Feature (`.devcontainer/unienv`)**: Published on each release tag to GHCR (`ghcr.io/rupeshbharambe24/unienv-features/unienv:0`) and pinned to the matching UniEnv release tag:
   ```json
   {
     "features": {
-      "ghcr.io/rupeshbharambe24/unienv/unienv:0": {
+      "ghcr.io/rupeshbharambe24/unienv-features/unienv:0": {
         "batteries": "office,pdf,data"
       }
     }

@@ -52,7 +52,7 @@ class DevcontainerDockerTests(unittest.TestCase):
         wf = (ROOT / ".github" / "workflows" / "release.yml").read_text()
         self.assertIn("linux/amd64,linux/arm64", wf)
         self.assertIn("ghcr.io/rupeshbharambe24/unienv:", wf)
-        self.assertIn("devcontainers/action@v1", wf)
+        self.assertIn("devcontainers/action@bef2cf2d1a019b00b45e184f83035e01bd1972f3", wf)
         self.assertIn("devcontainer-feature.json", wf)
 
 
