@@ -675,7 +675,13 @@ def render_skill(manifest: dict, recipes: list[dict]) -> str:
 
 def _vscode_ext_dirs(prefix: str) -> list[Path]:
     out: list[Path] = []
-    for ext_root in (HOME / ".vscode/extensions", HOME / ".vscode-server/extensions"):
+    for ext_root in (
+        HOME / ".vscode/extensions",
+        HOME / ".vscode-server/extensions",
+        HOME / ".vscode-insiders/extensions",
+        HOME / ".cursor/extensions",
+        HOME / ".windsurf/extensions",
+    ):
         if ext_root.is_dir():
             out.extend(sorted(ext_root.glob(f"{prefix}*")))
     return out
@@ -730,7 +736,7 @@ def agent_targets() -> list[dict]:
             "name": "Cline",
             "detect": [HOME / ".cline", *_vscode_ext_dirs("saoudrizwan.claude-dev")],
             "bin": "cline",
-            "instructions": HOME / "Documents/Cline/Rules/unienv.md",
+            "instructions": HOME / ".cline/rules/unienv.md",
             "skills": None,
             "owned_rules_file": True,
         },
@@ -1685,8 +1691,6 @@ def cmd_uninstall(args) -> int:
             warn(f"could not update {rc} ({e}); remove the UniEnv block manually")
     for a in agent_targets():
         try:
-            if a.get("owned_rules_file") and not detected(a):
-                continue
             if remove_block(a["instructions"], MD_BEGIN, MD_END):
                 info(f"  removed block from {a['instructions']}")
             if a.get("owned_rules_file") and a["instructions"].exists() and not a["instructions"].read_text().strip():

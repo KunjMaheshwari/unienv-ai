@@ -25,15 +25,21 @@ class ClineRooAdapterTests(unittest.TestCase):
         }
 
     def test_cline_detection_via_dirs_vscode_ext_or_bin(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            with patch.object(u, "HOME", home), patch.object(u, "which", return_value=None):
-                cline = next(a for a in u.agent_targets() if a["id"] == "cline")
-                self.assertFalse(u.detected(cline))
+        for ext_dir in (
+            ".vscode/extensions/saoudrizwan.claude-dev-3.8.0",
+            ".vscode-insiders/extensions/saoudrizwan.claude-dev-3.8.0",
+            ".cursor/extensions/saoudrizwan.claude-dev-3.8.0",
+            ".windsurf/extensions/saoudrizwan.claude-dev-3.8.0",
+        ):
+            with self.subTest(ext_dir=ext_dir), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                with patch.object(u, "HOME", home), patch.object(u, "which", return_value=None):
+                    cline = next(a for a in u.agent_targets() if a["id"] == "cline")
+                    self.assertFalse(u.detected(cline))
 
-                (home / ".vscode/extensions/saoudrizwan.claude-dev-3.8.0").mkdir(parents=True)
-                cline = next(a for a in u.agent_targets() if a["id"] == "cline")
-                self.assertTrue(u.detected(cline))
+                    (home / ext_dir).mkdir(parents=True)
+                    cline = next(a for a in u.agent_targets() if a["id"] == "cline")
+                    self.assertTrue(u.detected(cline))
 
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -96,11 +102,16 @@ class ClineRooAdapterTests(unittest.TestCase):
                 done = u.sync_agents(manifest, [])
                 self.assertEqual(done, ["Cline", "Roo Code"])
 
-                cline_rules = home / "Documents/Cline/Rules/unienv.md"
+                cline_rules = home / ".cline/rules/unienv.md"
                 roo_rules = home / ".roo/rules/unienv.md"
                 expected = u.render_agent_block(manifest).rstrip()
                 self.assertEqual(u.read_block(cline_rules, u.MD_BEGIN, u.MD_END), expected)
                 self.assertEqual(u.read_block(roo_rules, u.MD_BEGIN, u.MD_END), expected)
+
+                # Even if Cline extension was uninstalled before `unienv uninstall`,
+                # `~/.cline/rules/unienv.md` must still be cleaned up.
+                import shutil
+                shutil.rmtree(home / ".vscode")
 
                 with (
                     patch.object(u, "SHELL_FILES", []),
