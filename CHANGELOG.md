@@ -4,8 +4,8 @@ All notable changes to UniEnv AI are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
-### Added
-- Add an opt-in classical ML battery; Linux uses CPU-only XGBoost to avoid the NVIDIA runtime dependency. (#35)
+### Fixed
+- Remove stale generated shims on the first upgrade, preserve user files, and prune old backups once per sync or package addition. (#38)
 
 ### Security
 - Add MCP readonly and folder restrictions, disable arbitrary execution under roots, protect dangling output symlinks, sandbox Pandoc conversions, and expose policy settings in the Desktop extension. (#33)
