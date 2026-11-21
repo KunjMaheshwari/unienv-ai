@@ -111,6 +111,7 @@ class ClineRooAdapterTests(unittest.TestCase):
                 # Even if Cline extension was uninstalled before `unienv uninstall`,
                 # `~/.cline/rules/unienv.md` must still be cleaned up.
                 import shutil
+
                 shutil.rmtree(home / ".vscode")
 
                 with (
