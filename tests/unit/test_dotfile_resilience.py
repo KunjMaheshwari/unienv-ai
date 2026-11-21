@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import importlib.util
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -51,7 +52,9 @@ class DotfileResilienceTests(unittest.TestCase):
 
             err = io.StringIO()
             with (
+                patch.dict(os.environ, {"ZDOTDIR": ""}),
                 patch.object(u, "HOME", root),
+                patch.object(u, "STATE_FILE", root / ".unienv" / "state.json"),
                 patch.object(u, "ENV_SH", root / ".unienv" / "env.sh"),
                 patch.object(u, "SHELL_FILES", [ro, ok]),
                 patch.object(u, "upsert_block", side_effect=fake_upsert),
