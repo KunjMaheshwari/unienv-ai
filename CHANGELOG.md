@@ -4,10 +4,8 @@ All notable changes to UniEnv AI are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
-- Fix Windows shell wrappers, process locking, installer link safety and PATH cleanup; exercise the install/uninstall lifecycle in Windows CI.
-
-### Added
-- Fedora dnf and Arch pacman backends, with stock Fedora ffmpeg-free and per-package dnf retries. RHEL-family distributions are not treated as Fedora; configure EPEL and dependencies manually. (#7)
+### Fixed
+- Remove stale generated shims on the first upgrade, preserve user files, and prune old backups once per sync or package addition. (#38)
 
 ### Security
 - Add MCP readonly and folder restrictions, disable arbitrary execution under roots, protect dangling output symlinks, sandbox Pandoc conversions, and expose policy settings in the Desktop extension. (#33)
