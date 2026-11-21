@@ -207,6 +207,47 @@ if HAS_SOFFICE:
 else:
     print("  SKIP convert_document → pdf (LibreOffice not installed)")
 
+# Exercise restricted mode with the real server and Pandoc after installation.
+safe_dir = WORK / "safe"
+safe_dir.mkdir()
+secret = WORK / "outside-secret.txt"
+secret.write_text("UNIENV_PRIVATE_INCLUDE_SENTINEL")
+(safe_dir / "include.rst").write_text(f"Visible paragraph.\n\n.. include:: {secret}\n")
+safe_env = {
+    **env,
+    "UNIENV_MCP_MODE": "readonly",
+    "UNIENV_MCP_ROOTS": str(safe_dir),
+    "UNIENV_WORKDIR": str(safe_dir),
+}
+safe_msgs = [
+    call(201, "convert_document", {"input_path": str(safe_dir / "include.rst"), "output_format": "txt"}),
+    call(202, "run_python", {"code": "print('must not run')"}),
+    call(
+        203,
+        "convert_document",
+        {"input_path": str(safe_dir / "include.rst"), "output_format": "txt", "output_dir": str(WORK)},
+    ),
+]
+safe_proc = subprocess.run(
+    [str(UE), "mcp"],
+    input="\n".join(map(json.dumps, safe_msgs)) + "\n",
+    capture_output=True,
+    text=True,
+    env=safe_env,
+    timeout=180,
+)
+safe_replies = {m.get("id"): m for m in map(json.loads, safe_proc.stdout.splitlines())}
+safe_output = safe_dir / "include.txt"
+check(
+    "safe conversion does not disclose an included file outside roots",
+    not safe_replies[201]["result"]["isError"]
+    and safe_output.exists()
+    and "Visible paragraph." in safe_output.read_text()
+    and "UNIENV_PRIVATE_INCLUDE_SENTINEL" not in safe_output.read_text(),
+)
+check("safe mode blocks code execution over MCP", safe_replies[202]["result"]["isError"])
+check("safe mode rejects conversion output outside roots over MCP", safe_replies[203]["result"]["isError"])
+
 shutil.rmtree(WORK, ignore_errors=True)
 print(f"mcp: {failures} failed")
 sys.exit(failures)

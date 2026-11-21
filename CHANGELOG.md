@@ -4,8 +4,14 @@ All notable changes to UniEnv AI are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Fixed
+- Remove stale generated shims on the first upgrade, preserve user files, and prune old backups once per sync or package addition. (#38)
+
+### Security
+- Add MCP readonly and folder restrictions, disable arbitrary execution under roots, protect dangling output symlinks, sandbox Pandoc conversions, and expose policy settings in the Desktop extension. (#33)
+
 ### Added
-- Narrow sandbox write access to the UniEnv directory for Claude Code and Codex, with parsed configuration merges and reversible ownership tracking. (#37)
+- MCP image content for document reads, PDF renders and generated charts, with signature validation, a consistent 512 KB image limit, and a shared changed-file scan. (#31)
 
 ### Added
 - MCP server: clients can cancel running and queued tool calls, pings are answered during long calls, and long calls send a progress heartbeat every 10 s. Package installs can't be cancelled, so their rollback always runs. By @KunjMaheshwari in #131. (#32)
