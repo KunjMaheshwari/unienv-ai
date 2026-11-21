@@ -134,6 +134,8 @@ class ZdotdirTests(unittest.TestCase):
             for name, value in {
                 "HOME": home,
                 "UNIENV_HOME": unienv_home,
+                "STATE_FILE": unienv_home / "state.json",
+                "BACKUP_DIR": unienv_home / "backups",
                 "BIN": bin_dir,
                 "PY_DIR": unienv_home / "py",
                 "ENV_SH": unienv_home / "env.sh",
