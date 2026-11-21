@@ -1760,7 +1760,9 @@ def _toml_text(data: dict) -> str:
         if isinstance(item, list):
             return "[" + ", ".join(value(v) for v in item) + "]"
         if isinstance(item, dict):
-            return "{ " + ", ".join(json.dumps(k, ensure_ascii=False) + " = " + value(v) for k, v in item.items()) + " }"
+            return (
+                "{ " + ", ".join(json.dumps(k, ensure_ascii=False) + " = " + value(v) for k, v in item.items()) + " }"
+            )
         if isinstance(item, (_dt.datetime, _dt.date, _dt.time)):
             return item.isoformat()
         raise ValueError(f"unsupported TOML value: {type(item).__name__}")
@@ -1818,11 +1820,7 @@ def _edit_codex_sandbox_toml(
     else:
         new_sec = sec
     if remove_table_if_empty:
-        remaining = [
-            ln.strip()
-            for ln in new_sec.splitlines()
-            if ln.strip() and not ln.strip().startswith("#")
-        ]
+        remaining = [ln.strip() for ln in new_sec.splitlines() if ln.strip() and not ln.strip().startswith("#")]
         if not remaining:
             prefix = raw[: hdr.start()].rstrip("\n")
             suffix = raw[sec_end:].lstrip("\n")
@@ -1889,10 +1887,7 @@ def _sandbox_write(path: Path, data: dict, tool: str, *, raw_text: str | None = 
         try:
             parsed = tomllib.loads(text)
         except ValueError as exc:
-            die(
-                f"cannot safely edit {path} ({exc}); add this snippet manually:\n"
-                f"{sandbox_profile('codex')}"
-            )
+            die(f"cannot safely edit {path} ({exc}); add this snippet manually:\n{sandbox_profile('codex')}")
         if parsed != data:
             die(
                 f"cannot safely update {path} without altering existing tables; add this snippet manually:\n"
@@ -1948,9 +1943,7 @@ def _install_sandbox(path: Path, tool: str) -> bool:
     if not changed:
         return False
     raw_text = (
-        _edit_codex_sandbox_toml(raw, data["sandbox_workspace_write"]["writable_roots"])
-        if tool == "codex"
-        else None
+        _edit_codex_sandbox_toml(raw, data["sandbox_workspace_write"]["writable_roots"]) if tool == "codex" else None
     )
     _sandbox_write(path, data, tool, raw_text=raw_text)
     state[key] = record

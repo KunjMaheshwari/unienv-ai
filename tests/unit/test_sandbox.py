@@ -124,17 +124,17 @@ class SandboxProfileTests(unittest.TestCase):
             root = pathlib.Path(tmp)
             config = root / "config.toml"
             handwritten = (
-                '# Top-level comment with emoji 😀\n'
+                "# Top-level comment with emoji 😀\n"
                 'model = "o3-mini"\n'
                 'greeting = "hello 😀"\n\n'
-                '[mcp_servers.unienv]\n'
+                "[mcp_servers.unienv]\n"
                 'command = "/Users/me/.unienv/bin/unienv"\n'
                 'args = ["mcp"]\n\n'
-                '[[notify]]\n'
+                "[[notify]]\n"
                 'command = "say"\n\n'
-                '[sandbox_workspace_write]\n'
-                '# Keep network off\n'
-                'network_access = false\n'
+                "[sandbox_workspace_write]\n"
+                "# Keep network off\n"
+                "network_access = false\n"
                 'writable_roots = ["/tmp/work"]\n'
             )
             config.write_text(handwritten, encoding="utf-8")
