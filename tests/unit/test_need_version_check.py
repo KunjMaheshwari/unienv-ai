@@ -18,7 +18,16 @@ import unienv  # noqa: E402
 
 class SpecSatisfiedUnitTest(unittest.TestCase):
     def test_conservative_unknowns_and_npm_partial_versions(self):
-        for spec in ("docx@9", "docx@9.x", "docx@^8 || ^9", "docx@next", "docx@<=9", "docx@>9", "docx@=9", "docx@>=8 <=9"):
+        for spec in (
+            "docx@9",
+            "docx@9.x",
+            "docx@^8 || ^9",
+            "docx@next",
+            "docx@<=9",
+            "docx@>9",
+            "docx@=9",
+            "docx@>=8 <=9",
+        ):
             with self.subTest(spec=spec):
                 self.assertIsNot(unienv._spec_satisfied("node", spec, {"docx": "9.5.0"})[0], False)
         self.assertIsNone(unienv._spec_satisfied("node", "docx@<=9", {"docx": "9.5.0"})[0])
