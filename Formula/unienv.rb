@@ -13,10 +13,10 @@ class Unienv < Formula
       #!/bin/sh
       set -e
       UV="#{Formula["uv"].opt_bin}/uv"
-      PY="$("$UV" python find 3.12 --managed-python 2>/dev/null || true)"
+      PY="$("$UV" python find 3.12 --managed-python --system 2>/dev/null || true)"
       if [ -z "$PY" ]; then
         "$UV" python install 3.12 --quiet
-        PY="$("$UV" python find 3.12 --managed-python)"
+        PY="$("$UV" python find 3.12 --managed-python --system)"
       fi
       exec "$PY" "#{opt_libexec}/src/unienv.py" "$@"
     EOS
@@ -28,6 +28,9 @@ class Unienv < Formula
     <<~EOS
       Finish setting up UniEnv AI's shared environment and AI tool wiring:
         unienv install
+
+      To upgrade later and refresh agent files and recipes:
+        brew upgrade unienv && unienv install
     EOS
   end
 

@@ -1604,7 +1604,7 @@ def cmd_update(args) -> int:
     import urllib.request
 
     if _is_homebrew_install():
-        info("UniEnv was installed via Homebrew; update with: brew upgrade unienv")
+        info("UniEnv was installed via Homebrew; update with: brew upgrade unienv && unienv install")
         return 0
 
     share = UNIENV_HOME / "share"
