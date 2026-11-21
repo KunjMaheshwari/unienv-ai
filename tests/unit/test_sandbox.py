@@ -119,6 +119,72 @@ class SandboxProfileTests(unittest.TestCase):
         self.assertIn("file-write*", text)
         self.assertIn(json.dumps(str(u.UNIENV_HOME)), text)
 
+    def test_codex_surgical_toml_edit_preserves_comments_tables_arrays_and_emojis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            config = root / "config.toml"
+            handwritten = (
+                '# Top-level comment with emoji 😀\n'
+                'model = "o3-mini"\n'
+                'greeting = "hello 😀"\n\n'
+                '[mcp_servers.unienv]\n'
+                'command = "/Users/me/.unienv/bin/unienv"\n'
+                'args = ["mcp"]\n\n'
+                '[[notify]]\n'
+                'command = "say"\n\n'
+                '[sandbox_workspace_write]\n'
+                '# Keep network off\n'
+                'network_access = false\n'
+                'writable_roots = ["/tmp/work"]\n'
+            )
+            config.write_text(handwritten, encoding="utf-8")
+            with patch.object(u, "UNIENV_HOME", root / "unienv"):
+                self.assertTrue(u._install_codex_sandbox(config))
+                updated_text = config.read_text(encoding="utf-8")
+                self.assertIn("# Top-level comment with emoji 😀", updated_text)
+                self.assertIn("[mcp_servers.unienv]", updated_text)
+                self.assertIn("[[notify]]", updated_text)
+                self.assertIn("# Keep network off", updated_text)
+                self.assertEqual(
+                    tomllib.loads(updated_text)["sandbox_workspace_write"]["writable_roots"],
+                    ["/tmp/work", str(root / "unienv")],
+                )
+                u._uninstall_sandbox()
+                restored_text = config.read_text(encoding="utf-8")
+                self.assertIn("[mcp_servers.unienv]", restored_text)
+                self.assertIn("[[notify]]", restored_text)
+                self.assertEqual(tomllib.loads(restored_text), tomllib.loads(handwritten))
+
+    def test_symlink_and_permissions_preserved_and_corrupt_state_does_not_abort_uninstall(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            real_cfg = root / "dotfiles_config.toml"
+            real_cfg.write_text('model = "gpt-5"\n', encoding="utf-8")
+            real_cfg.chmod(0o600)
+            link_cfg = root / "config.toml"
+            link_cfg.symlink_to(real_cfg)
+
+            with patch.object(u, "UNIENV_HOME", root / "unienv"):
+                self.assertTrue(u._install_codex_sandbox(link_cfg))
+                self.assertTrue(link_cfg.is_symlink())
+                self.assertEqual(real_cfg.stat().st_mode & 0o777, 0o600)
+                self.assertIn("[sandbox_workspace_write]", real_cfg.read_text(encoding="utf-8"))
+
+                # Corrupt sandbox-settings.json: cmd_uninstall must warn and still finish
+                (root / "unienv/sandbox-settings.json").write_text("{corrupt", encoding="utf-8")
+                with (
+                    patch.object(u, "HOME", root),
+                    patch.object(u, "SHELL_FILES", []),
+                    patch.object(u, "agent_targets", return_value=[]),
+                    patch.object(u, "mcp_clients", return_value={}),
+                    patch.object(u, "LAUNCH_AGENT", root / "absent.plist"),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()) as err,
+                ):
+                    rc = u.cmd_uninstall(argparse.Namespace(purge=False))
+                self.assertEqual(rc, 0)
+                self.assertIn("could not read sandbox state", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

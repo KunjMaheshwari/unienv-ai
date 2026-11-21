@@ -1700,7 +1700,7 @@ def _toml_text(data: dict) -> str:
 
     def value(item):
         if isinstance(item, str):
-            return json.dumps(item)
+            return json.dumps(item, ensure_ascii=False)
         if isinstance(item, bool):
             return str(item).lower()
         if isinstance(item, (int, float)):
@@ -1708,12 +1708,71 @@ def _toml_text(data: dict) -> str:
         if isinstance(item, list):
             return "[" + ", ".join(value(v) for v in item) + "]"
         if isinstance(item, dict):
-            return "{ " + ", ".join(json.dumps(k) + " = " + value(v) for k, v in item.items()) + " }"
+            return "{ " + ", ".join(json.dumps(k, ensure_ascii=False) + " = " + value(v) for k, v in item.items()) + " }"
         if isinstance(item, (_dt.datetime, _dt.date, _dt.time)):
             return item.isoformat()
         raise ValueError(f"unsupported TOML value: {type(item).__name__}")
 
-    return "\n".join(json.dumps(k) + " = " + value(v) for k, v in data.items()) + "\n"
+    if set(data.keys()) == {"sandbox_workspace_write"} and isinstance(data["sandbox_workspace_write"], dict):
+        body = "\n".join(f"{k} = {value(v)}" for k, v in data["sandbox_workspace_write"].items())
+        return f"[sandbox_workspace_write]\n{body}\n" if body else "[sandbox_workspace_write]\n"
+    return "\n".join(json.dumps(k, ensure_ascii=False) + " = " + value(v) for k, v in data.items()) + "\n"
+
+
+def _edit_codex_sandbox_toml(
+    raw: str,
+    desired_roots: list[str] | None,
+    *,
+    remove_table_if_empty: bool = False,
+) -> str:
+    """Surgically update only [sandbox_workspace_write].writable_roots in TOML text."""
+    roots_lit = (
+        "[" + ", ".join(json.dumps(r, ensure_ascii=False) for r in desired_roots) + "]"
+        if desired_roots is not None
+        else None
+    )
+    hdr = re.search(r"(?m)^[ \t]*\[sandbox_workspace_write\][ \t]*(?:#.*)?$", raw)
+    if hdr is None:
+        if roots_lit is None:
+            return raw
+        sep = "" if not raw else ("\n" if raw.endswith("\n") else "\n\n")
+        return f"{raw}{sep}[sandbox_workspace_write]\nwritable_roots = {roots_lit}\n"
+
+    next_hdr = re.search(r"(?m)^[ \t]*\[(?:\[)?[^\]\n]+\](?:\])?[ \t]*(?:#.*)?$", raw[hdr.end() :])
+    sec_start = hdr.end()
+    sec_end = sec_start + next_hdr.start() if next_hdr else len(raw)
+    sec = raw[sec_start:sec_end]
+    wr = re.search(
+        r"(?ms)^([ \t]*writable_roots[ \t]*=[ \t]*)(\[[^\]]*\])([ \t]*(?:#[^\n]*)?)(?:\r?\n|$)",
+        sec,
+    )
+    if roots_lit is not None:
+        if wr is not None:
+            new_sec = sec[: wr.start(2)] + roots_lit + sec[wr.end(2) :]
+        else:
+            new_sec = f"\nwritable_roots = {roots_lit}" + sec
+        return raw[:sec_start] + new_sec + raw[sec_end:]
+
+    # Removing writable_roots key (and optionally the table if empty)
+    if wr is not None:
+        new_sec = sec[: wr.start()] + sec[wr.end() :]
+    else:
+        new_sec = sec
+    if remove_table_if_empty:
+        remaining = [
+            ln.strip()
+            for ln in new_sec.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        if not remaining:
+            prefix = raw[: hdr.start()].rstrip("\n")
+            suffix = raw[sec_end:].lstrip("\n")
+            if prefix and suffix:
+                return prefix + "\n\n" + suffix
+            if prefix:
+                return prefix + "\n"
+            return suffix
+    return raw[:sec_start] + new_sec + raw[sec_end:]
 
 
 def sandbox_profile(tool: str) -> str:
@@ -1725,11 +1784,12 @@ def sandbox_profile(tool: str) -> str:
                 "sandbox": {"filesystem": {"allowRead": [root], "allowWrite": [root]}},
             },
             indent=2,
+            ensure_ascii=False,
         )
     if tool == "codex":
-        return _toml_text({"sandbox_workspace_write": {"writable_roots": [root]}})
+        return f"[sandbox_workspace_write]\nwritable_roots = [{json.dumps(root, ensure_ascii=False)}]\n"
     if tool in ("gemini", "seatbelt"):
-        escaped = json.dumps(root)
+        escaped = json.dumps(root, ensure_ascii=False)
         return (
             ";; Merge into an existing Seatbelt profile; this is not a complete policy.\n"
             f"(allow file-read* file-map-executable (subpath {escaped}))\n"
@@ -1754,15 +1814,37 @@ def _sandbox_state() -> tuple[Path, dict]:
     return path, _sandbox_load(path, "claude")
 
 
-def _sandbox_write(path: Path, data: dict, tool: str) -> None:
-    text = _toml_text(data) if tool == "codex" else json.dumps(data, indent=2) + "\n"
+def _write_preserving_link_and_mode(path: Path, text: str) -> None:
+    target = Path(os.path.realpath(path)) if path.is_symlink() else path
+    mode = (target.stat().st_mode & 0o7777) if target.exists() else None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(target, text)
+    if mode is not None:
+        with contextlib.suppress(OSError):
+            target.chmod(mode)
+
+
+def _sandbox_write(path: Path, data: dict, tool: str, *, raw_text: str | None = None) -> None:
     if tool == "codex":
-        tomllib.loads(text)
+        text = raw_text if raw_text is not None else _toml_text(data)
+        try:
+            parsed = tomllib.loads(text)
+        except ValueError as exc:
+            die(
+                f"cannot safely edit {path} ({exc}); add this snippet manually:\n"
+                f"{sandbox_profile('codex')}"
+            )
+        if parsed != data:
+            die(
+                f"cannot safely update {path} without altering existing tables; add this snippet manually:\n"
+                f"{sandbox_profile('codex')}"
+            )
+    else:
+        text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     if path.exists():
         backup = path.with_name(path.name + f".unienv-backup-{_dt.datetime.now():%Y%m%d-%H%M%S-%f}")
         shutil.copy2(path, backup)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(path, text)
+    _write_preserving_link_and_mode(path, text)
 
 
 def _sandbox_fields(tool: str) -> dict[tuple[str, ...], list[str]]:
@@ -1777,6 +1859,7 @@ def _sandbox_fields(tool: str) -> dict[tuple[str, ...], list[str]]:
 
 
 def _install_sandbox(path: Path, tool: str) -> bool:
+    raw = path.read_text(encoding="utf-8") if path.exists() else ""
     data = _sandbox_load(path, tool)
     state_path, state = _sandbox_state()
     key = str(path.resolve())
@@ -1805,18 +1888,28 @@ def _install_sandbox(path: Path, tool: str) -> bool:
                 changed = True
     if not changed:
         return False
-    _sandbox_write(path, data, tool)
+    raw_text = (
+        _edit_codex_sandbox_toml(raw, data["sandbox_workspace_write"]["writable_roots"])
+        if tool == "codex"
+        else None
+    )
+    _sandbox_write(path, data, tool, raw_text=raw_text)
     state[key] = record
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(state_path, json.dumps(state, indent=2) + "\n")
+    atomic_write(state_path, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
     return True
 
 
 def _uninstall_sandbox() -> None:
-    state_path, state = _sandbox_state()
+    try:
+        state_path, state = _sandbox_state()
+    except (OSError, ValueError, SystemExit) as exc:
+        warn(f"could not read sandbox state: {exc}")
+        return
     for key, record in list(state.items()):
         path = Path(key)
         try:
+            raw = path.read_text(encoding="utf-8") if path.exists() else ""
             data = _sandbox_load(path, record["tool"])
             for dotted, items in record["added"].items():
                 fields = dotted.split(".")
@@ -1834,14 +1927,27 @@ def _uninstall_sandbox() -> None:
                     parent.pop(fields[-1], None)
             if path.exists():
                 if record["new_file"] and not data:
-                    path.unlink()
+                    target = Path(os.path.realpath(path)) if path.is_symlink() else path
+                    if path.is_symlink():
+                        path.unlink()
+                    if target.exists():
+                        target.unlink()
                 else:
-                    _sandbox_write(path, data, record["tool"])
+                    raw_text = None
+                    if record["tool"] == "codex":
+                        sww = data.get("sandbox_workspace_write")
+                        desired_roots = sww.get("writable_roots") if isinstance(sww, dict) else None
+                        raw_text = _edit_codex_sandbox_toml(
+                            raw,
+                            desired_roots,
+                            remove_table_if_empty=["sandbox_workspace_write"] in record["created"],
+                        )
+                    _sandbox_write(path, data, record["tool"], raw_text=raw_text)
             del state[key]
-        except (OSError, SystemExit) as exc:
+        except (OSError, ValueError, SystemExit) as exc:
             warn(f"could not remove sandbox settings from {path}: {exc}")
     if state:
-        atomic_write(state_path, json.dumps(state, indent=2) + "\n")
+        atomic_write(state_path, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
     elif state_path.exists():
         state_path.unlink()
 
