@@ -219,9 +219,30 @@ def _write_block_text(path: Path, text: str, eol: str) -> None:
         f.write(text.replace("\n", eol))
 
 
+def _has_malformed_block(text: str, begin: str, end: str) -> bool:
+    """True when begin/end markers are unbalanced or orphaned."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    in_block = False
+    for line in normalized.splitlines():
+        if line.strip() == begin:
+            if in_block:
+                return True
+            in_block = True
+        elif line.strip() == end:
+            if not in_block:
+                return True
+            in_block = False
+    return in_block
+
+
 def upsert_block(path: Path, body: str, begin: str, end: str, *, top: bool = False) -> bool:
     """Insert or replace a marked block. Returns True if the file changed."""
     old, eol = _read_block_text(path) if path.exists() else ("", os.linesep)
+    if _has_malformed_block(old, begin, end):
+        warn(
+            f"{path} has an incomplete UniEnv block (missing end marker); fix or remove the orphaned marker line first"
+        )
+        return False
     block = f"{begin}\n{body.rstrip()}\n{end}\n"
     pattern = re.compile(re.escape(begin) + r".*?" + re.escape(end) + r"\n?", re.S)
     if pattern.search(old):
@@ -240,6 +261,11 @@ def remove_block(path: Path, begin: str, end: str) -> bool:
     if not path.exists():
         return False
     old, eol = _read_block_text(path)
+    if _has_malformed_block(old, begin, end):
+        warn(
+            f"{path} has an incomplete UniEnv block (missing end marker); fix or remove the orphaned marker line first"
+        )
+        return False
     new = re.sub(r"\n?" + re.escape(begin) + r".*?" + re.escape(end) + r"\n?", "\n", old, flags=re.S)
     new = new.strip("\n") + ("\n" if new.strip() else "")
     if new == old:
@@ -279,6 +305,8 @@ def read_block(path: Path, begin: str, end: str) -> str | None:
     try:
         text = path.read_text(encoding="utf-8", errors="surrogateescape")
     except OSError:
+        return None
+    if _has_malformed_block(text, begin, end):
         return None
     m = re.search(re.escape(begin) + r"\n(.*?)\n" + re.escape(end), text, re.S)
     return m.group(1) if m else None
@@ -325,7 +353,7 @@ def default_state(recipes: dict) -> dict:
         "version": VERSION,
         "batteries": [k for k, r in recipes.items() if r.get("default") and not r.get("always")],
         "extras": {"python": [], "node": [], "brew": [], "cask": [], "apt": []},
-        "options": {"wire_homebrew": True, "exclude": []},
+        "options": {"wire_homebrew": True, "wire_shells": True, "exclude": []},
         "wired_shell_files": [],
     }
 
@@ -963,7 +991,12 @@ def wire_shells(state: dict | None = None) -> list[str]:
 
 
 def do_sync(
-    state: dict, recipes_all: dict, *, quiet: bool = False, wire: bool = True, all_agents: bool = False
+    state: dict,
+    recipes_all: dict,
+    *,
+    quiet: bool = False,
+    wire: bool | None = None,
+    all_agents: bool = False,
 ) -> dict:
     recipes = active_recipes(recipes_all, state)
     w = wanted(recipes, state)
@@ -973,7 +1006,8 @@ def do_sync(
     manifest = write_manifest(recipes, state, w)
     agents = sync_agents(manifest, recipes, only_detected=not all_agents)
     before_wired = list(state.get("wired_shell_files", []))
-    wired = wire_shells(state) if wire else []
+    should_wire = state.get("options", {}).get("wire_shells", True) if wire is None else wire
+    wired = wire_shells(state) if should_wire else []
     if state.get("wired_shell_files", []) != before_wired:
         save_state(state)
     if not quiet:
@@ -1050,6 +1084,7 @@ def cmd_install(args) -> int:
                 hints.append(f"unknown battery: {b}" + (f" (did you mean {close[0]}?)" if close else ""))
             die("; ".join(hints) + f". Available: {', '.join(recipes_all)}")
         state["batteries"] = uniq(state["batteries"] + [b for b in req if not recipes_all[b].get("always")])
+    state["options"]["wire_shells"] = not args.no_wire
     UNIENV_HOME.mkdir(parents=True, exist_ok=True)
     save_state(state)
     recipes = active_recipes(recipes_all, state)
@@ -1080,7 +1115,7 @@ def cmd_sync(args) -> int:
     recipes_all = load_recipes()
     state = load_state(recipes_all)
     step("Regenerating shims, env.sh, manifest and agent files")
-    do_sync(state, recipes_all, wire=not args.no_wire, all_agents=args.all_agents)
+    do_sync(state, recipes_all, wire=False if args.no_wire else None, all_agents=args.all_agents)
     return 0
 
 
@@ -1114,16 +1149,21 @@ def cmd_need(args) -> int:
         info(f"  note: not in a curated recipe, installing from the public registry: {', '.join(uncurated)}")
 
     # snapshot so a failed install can be rolled back exactly
-    snap = BACKUP_DIR / _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    snap.mkdir(parents=True, exist_ok=True)
-    for f in [
+    tracked = [
         STATE_FILE,
         PY_DIR / "pyproject.toml",
         PY_DIR / "uv.lock",
+        PY_DIR / ".python-version",
         NODE_DIR / "package.json",
         NODE_DIR / "package-lock.json",
-    ]:
-        if f.exists():
+    ]
+    existed = {f: f.exists() for f in tracked}
+    venv = PY_DIR / ".venv"
+    venv_existed = os.path.lexists(venv)
+    snap = BACKUP_DIR / _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    snap.mkdir(parents=True, exist_ok=True)
+    for f in tracked:
+        if existed[f]:
             shutil.copy2(f, snap / f"{f.parent.name}__{f.name}")
 
     state["options"]["exclude"] = [x for x in state["options"]["exclude"] if x not in pkgs]
@@ -1149,13 +1189,26 @@ def cmd_need(args) -> int:
                 raise RuntimeError(", ".join(failed))
     except (subprocess.CalledProcessError, RuntimeError, SystemExit) as e:
         warn(f"install failed ({e}); rolling back")
-        for f in snap.iterdir():
-            parent, name = f.name.split("__", 1)
-            dest = {"py": PY_DIR, "node": NODE_DIR}.get(parent, UNIENV_HOME) / name
-            shutil.copy2(f, dest)
+        for f in tracked:
+            if existed[f]:
+                shutil.copy2(snap / f"{f.parent.name}__{f.name}", f)
+            elif f.exists():
+                f.unlink()
+        if not existed[NODE_DIR / "package.json"] and (NODE_DIR / "node_modules").exists():
+            shutil.rmtree(NODE_DIR / "node_modules", ignore_errors=True)
+        if not venv_existed and os.path.lexists(venv):
+            if venv.is_symlink():
+                venv.unlink()
+            else:
+                shutil.rmtree(venv)
         state = load_state(recipes_all)
-        if kind == "python":
-            install_python(wanted(recipes, state)["python"])
+        try:
+            if kind == "python" and existed[PY_DIR / "pyproject.toml"]:
+                install_python(wanted(recipes, state)["python"])
+            elif kind == "node" and existed[NODE_DIR / "package.json"]:
+                install_node(wanted(recipes, state)["node"])
+        except (subprocess.CalledProcessError, RuntimeError, SystemExit) as re_err:
+            warn(f"rollback re-install failed ({re_err}); run unienv install to repair")
         log_event(event="need-failed", kind=kind, packages=new)
         return 1
     save_state(state)
@@ -1501,6 +1554,7 @@ def cmd_update(args) -> int:
     share = UNIENV_HOME / "share"
     if share.is_symlink():
         die(f"{share} links to a development checkout; update it with `git pull` instead.")
+    no_wire = args.no_wire or not load_state(load_recipes()).get("options", {}).get("wire_shells", True)
     url = REPO_TARBALL.format(ref=args.ref)
     step(f"Downloading {url}")
     with tempfile.TemporaryDirectory() as tmp:
@@ -1522,7 +1576,7 @@ def cmd_update(args) -> int:
     new_share.rename(share)
     step("Re-installing with the new version")
     cli = share / "src/unienv.py"
-    return subprocess.call([sys.executable, str(cli), "install"] + (["--no-wire"] if args.no_wire else []))
+    return subprocess.call([sys.executable, str(cli), "install"] + (["--no-wire"] if no_wire else []))
 
 
 # ── doctor ──────────────────────────────────────────────────────────────────
@@ -1615,6 +1669,21 @@ def cmd_doctor(args) -> int:
         )
 
     # Shell wiring: what agents and GUI apps actually see
+    for rc in SHELL_FILES:
+        if not rc.exists():
+            continue
+        try:
+            rc_text, _ = _read_block_text(rc)
+        except OSError:
+            continue
+        if _has_malformed_block(rc_text, SHELL_BEGIN, SHELL_END):
+            short = str(rc).replace(str(HOME), "~")
+            add(
+                f"block:{rc.name}",
+                "fail",
+                f"{short} has an incomplete UniEnv block (missing end marker)",
+                f"restore `{SHELL_END}` or delete the orphaned `{SHELL_BEGIN}` line in {short}, then run `unienv sync`",
+            )
     target = str(BIN / "ue-py")
     probes = [
         ("zsh -c", ["/bin/zsh", "-c", "command -v ue-py"], None),
@@ -1663,8 +1732,22 @@ def cmd_doctor(args) -> int:
         for a in agent_targets():
             if not detected(a):
                 continue
-            cur = read_block(a["instructions"], MD_BEGIN, MD_END)
-            short = str(a["instructions"]).replace(str(HOME), "~")
+            inst = a["instructions"]
+            short = str(inst).replace(str(HOME), "~")
+            try:
+                inst_text = _read_block_text(inst)[0] if inst.exists() else ""
+            except OSError as exc:
+                add(f"agent:{a['id']}", "warn", f"{a['name']}: cannot read {short}: {exc}")
+                continue
+            if _has_malformed_block(inst_text, MD_BEGIN, MD_END):
+                add(
+                    f"agent:{a['id']}",
+                    "fail",
+                    f"{a['name']}: {short} has an incomplete UniEnv block (missing end marker)",
+                    f"restore `{MD_END}` or delete the orphaned `{MD_BEGIN}` line in {short}, then run `unienv sync`",
+                )
+                continue
+            cur = read_block(inst, MD_BEGIN, MD_END)
             if cur is None:
                 add(f"agent:{a['id']}", "fail", f"{a['name']}: no UniEnv block in {short}", "unienv sync")
             elif cur.rstrip() != expected:
@@ -1860,8 +1943,10 @@ def cmd_wire(args) -> int:
         run(["launchctl", "setenv", "PATH", path])
         info("✓ GUI PATH set (experimental). Quit and reopen desktop apps to pick it up.")
         return 0
-    state = load_state(load_recipes())
+    recipes_all = load_recipes()
+    state = load_state(recipes_all)
     changed = wire_shells(state)
+    state["options"]["wire_shells"] = True
     save_state(state)
     info("✓ shell files updated: " + (", ".join(changed) if changed else "already wired"))
     return 0
@@ -2062,7 +2147,7 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
 
     args = p.parse_args(argv)
     mutating = (
-        args.cmd in ("install", "need", "sync", "wire", "uninstall")
+        args.cmd in ("install", "need", "sync", "uninstall", "wire")
         or (args.cmd == "upgrade" and not args.dry_run)
         or (args.cmd == "doctor" and args.fix)
     )
