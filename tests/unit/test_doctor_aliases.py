@@ -35,6 +35,20 @@ class DoctorAliasTests(unittest.TestCase):
             bash = next(call for call in run.call_args_list if call.args[0][0] == "/bin/bash")
             self.assertNotIn(". ~/.bashrc", bash.args[0][-1])
 
+    def test_early_exit_without_marker_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".zshrc").write_text("exit 0\n")
+            diagnostics = []
+            fake_completed = subprocess.CompletedProcess(args=["/bin/zsh"], returncode=0, stdout="", stderr="")
+            with (
+                patch.object(u, "HOME", home),
+                patch.object(Path, "exists", return_value=True),
+                patch.object(u.subprocess, "run", return_value=fake_completed),
+            ):
+                self.assertEqual(u._probe_shell_aliases(diagnostics), [])
+            self.assertTrue(any("exited before printing aliases" in message for _, message in diagnostics))
+
     def test_parse_alias_output_handles_multiple_aliases_per_line_and_shell_formats(self):
         sample = """
         # Commented alias ls='eza'

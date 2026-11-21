@@ -1416,7 +1416,13 @@ def _probe_shell_aliases(diagnostics: list[tuple[str, str]] | None = None) -> li
             continue
         except (FileNotFoundError, OSError):
             continue
-        out = r.stdout.split(marker + "\n", 1)[-1] if marker in r.stdout else r.stdout
+        if marker not in r.stdout:
+            if diagnostics is not None:
+                diagnostics.append(
+                    (label, "alias probe exited before printing aliases; check rc files for early exit or exec")
+                )
+            continue
+        out = r.stdout.split(marker + "\n", 1)[-1]
         for name, target in _parse_alias_output(out):
             why = _hostile_alias_reason(name, target)
             if why and (label, name) not in seen:
