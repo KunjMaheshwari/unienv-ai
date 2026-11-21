@@ -1069,7 +1069,7 @@ def _version_matches(installed: str, op: str, target: str) -> bool | None:
         if op not in ("==", "!="):
             return None
         prefix = tuple(int(n) for n in target[:-2].split("."))
-        values = tuple(int(n) for n in installed.split("."))
+        values = iv + (0,) * max(0, len(prefix) - len(iv))
         result = values[: len(prefix)] == prefix
         return result if op == "==" else not result
     if op in ("==", "=", "==="):

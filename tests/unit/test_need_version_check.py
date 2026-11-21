@@ -143,7 +143,14 @@ class CmdNeedVersionCheckTest(unittest.TestCase):
         self.assertIn("✓ already available: docx@8.5.0", out)
         self.assertEqual(err, "")
 
-    def test_unsatisfied_python_extra_exits_nonzero(self):
+    def test_pep440_wildcard_zero_pads_installed_version(self):
+        pkgs = {"foo": "2"}
+        self.assertTrue(unienv._spec_satisfied("python", "foo==2.0.*", pkgs)[0])
+        self.assertFalse(unienv._spec_satisfied("python", "foo!=2.0.*", pkgs)[0])
+        self.assertFalse(unienv._spec_satisfied("python", "foo==2.1.*", pkgs)[0])
+        self.assertTrue(unienv._spec_satisfied("python", "foo!=2.1.*", pkgs)[0])
+
+    def test_unknown_python_extra_falls_back(self):
         rc, out, err = self._run_need(["markitdown[audio]>=0.1"])
         self.assertEqual(rc, 0)
         self.assertIn("✓", out)
