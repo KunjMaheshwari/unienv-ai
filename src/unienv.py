@@ -330,13 +330,9 @@ def default_state(recipes: dict) -> dict:
     }
 
 
-def _state_file() -> Path:
-    return STATE_FILE if STATE_FILE.parent == UNIENV_HOME else UNIENV_HOME / "state.json"
-
-
 def load_state(recipes: dict) -> dict:
     state = default_state(recipes)
-    sf = _state_file()
+    sf = STATE_FILE
     if sf.exists():
         try:
             saved = json.loads(sf.read_text())
@@ -360,9 +356,9 @@ def load_state(recipes: dict) -> dict:
 
 
 def save_state(state: dict) -> None:
-    UNIENV_HOME.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     state["version"] = VERSION
-    atomic_write(_state_file(), json.dumps(state, indent=2) + "\n")
+    atomic_write(STATE_FILE, json.dumps(state, indent=2) + "\n")
 
 
 def active_recipes(recipes: dict, state: dict) -> list[dict]:
@@ -832,7 +828,7 @@ def _shell_files(state: dict | None = None) -> list[Path]:
         if zenv not in files:
             files.append(zenv)
     if state is None:
-        state = load_state(load_recipes()) if _state_file().exists() else {}
+        state = load_state(load_recipes()) if STATE_FILE.exists() else {}
     for raw in state.get("wired_shell_files", []):
         if isinstance(raw, str) and Path(raw).is_absolute() and Path(raw) not in files:
             files.append(Path(raw))

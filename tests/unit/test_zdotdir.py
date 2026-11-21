@@ -30,6 +30,7 @@ class ZdotdirTests(unittest.TestCase):
                 patch.dict(os.environ, {"ZDOTDIR": str(zdot)}),
                 patch.object(u, "HOME", home),
                 patch.object(u, "UNIENV_HOME", unienv_home),
+                patch.object(u, "STATE_FILE", unienv_home / "state.json"),
                 patch.object(u, "ENV_SH", env_sh),
                 patch.object(u, "SHELL_FILES", shell_files),
             ):
@@ -108,6 +109,7 @@ class ZdotdirTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"ZDOTDIR": str(home)}),
                 patch.object(u, "HOME", home),
+                patch.object(u, "STATE_FILE", home / ".unienv" / "state.json"),
                 patch.object(u, "SHELL_FILES", shell_files),
             ):
                 self.assertIsNone(u._zdotdir())
