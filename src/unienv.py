@@ -326,20 +326,34 @@ def default_state(recipes: dict) -> dict:
         "batteries": [k for k, r in recipes.items() if r.get("default") and not r.get("always")],
         "extras": {"python": [], "node": [], "brew": [], "cask": [], "apt": []},
         "options": {"wire_homebrew": True, "exclude": []},
+        "wired_shell_files": [],
     }
+
+
+def _state_file() -> Path:
+    return STATE_FILE if STATE_FILE.parent == UNIENV_HOME else UNIENV_HOME / "state.json"
 
 
 def load_state(recipes: dict) -> dict:
     state = default_state(recipes)
-    if STATE_FILE.exists():
+    sf = _state_file()
+    if sf.exists():
         try:
-            saved = json.loads(STATE_FILE.read_text())
-        except json.JSONDecodeError:
+            saved = json.loads(sf.read_text())
+        except (json.JSONDecodeError, OSError):
             backups = sorted(BACKUP_DIR.glob("*/*__state.json"))
-            warn(f"{STATE_FILE} is corrupt; " + (f"using the backup {backups[-1]}" if backups else "using defaults"))
-            saved = json.loads(backups[-1].read_text()) if backups else {}
+            warn(f"{sf} is corrupt; " + (f"using the backup {backups[-1]}" if backups else "using defaults"))
+            try:
+                saved = json.loads(backups[-1].read_text()) if backups else {}
+            except (json.JSONDecodeError, OSError):
+                saved = {}
+        if not isinstance(saved, dict):
+            saved = {}
         state.update({k: v for k, v in saved.items() if k in state and k != "options"})
-        state["options"].update(saved.get("options", {}))
+        if isinstance(saved.get("options"), dict):
+            state["options"].update(saved.get("options", {}))
+        if not isinstance(state.get("wired_shell_files"), list):
+            state["wired_shell_files"] = []
         for k in default_state(recipes)["extras"]:
             state["extras"].setdefault(k, [])
     return state
@@ -348,7 +362,7 @@ def load_state(recipes: dict) -> dict:
 def save_state(state: dict) -> None:
     UNIENV_HOME.mkdir(parents=True, exist_ok=True)
     state["version"] = VERSION
-    atomic_write(STATE_FILE, json.dumps(state, indent=2) + "\n")
+    atomic_write(_state_file(), json.dumps(state, indent=2) + "\n")
 
 
 def active_recipes(recipes: dict, state: dict) -> list[dict]:
@@ -757,7 +771,7 @@ def _zdotdir() -> Path | None:
     return None if same else p
 
 
-def _shell_files() -> list[Path]:
+def _shell_files(state: dict | None = None) -> list[Path]:
     if not SHELL_FILES:
         return []
     files = list(SHELL_FILES)
@@ -766,21 +780,23 @@ def _shell_files() -> list[Path]:
         zenv = zdot / ".zshenv"
         if zenv not in files:
             files.append(zenv)
-    state_path = UNIENV_HOME / "state.json"
-    try:
-        state = json.loads(state_path.read_text())
-    except (OSError, ValueError):
-        state = {}
+    if state is None:
+        state = load_state(load_recipes()) if _state_file().exists() else {}
     for raw in state.get("wired_shell_files", []):
         if isinstance(raw, str) and Path(raw).is_absolute() and Path(raw) not in files:
             files.append(Path(raw))
     return files
 
 
-def wire_shells() -> list[str]:
+def wire_shells(state: dict | None = None) -> list[str]:
+    own_state = state is None
+    if state is None:
+        state = load_state(load_recipes())
+    paths = state.setdefault("wired_shell_files", [])
+    before_paths = list(paths)
     body = f'[ -f "{ENV_SH}" ] && . "{ENV_SH}"'
     changed = []
-    for rc in _shell_files():
+    for rc in _shell_files(state):
         # always wire zsh's .zshenv and the POSIX .profile; bash's own files only if they exist
         # (login bash reads .bash_profile or .bash_login *instead of* .profile when present)
         if rc.name not in (".zshenv", ".profile") and not rc.exists():
@@ -789,16 +805,13 @@ def wire_shells() -> list[str]:
             if upsert_block(rc, body, SHELL_BEGIN, SHELL_END):
                 changed.append(str(rc).replace(str(HOME), "~"))
             if rc.name == ".zshenv" and rc.resolve().parent != HOME.resolve():
-                state_path = UNIENV_HOME / "state.json"
-                state = json.loads(state_path.read_text()) if state_path.exists() else {}
-                paths = state.setdefault("wired_shell_files", [])
                 saved = str(rc.resolve())
                 if saved not in paths:
                     paths.append(saved)
-                    state_path.parent.mkdir(parents=True, exist_ok=True)
-                    atomic_write(state_path, json.dumps(state, indent=2) + "\n")
         except OSError as e:
             warn(f"could not update {rc} ({e}); add `source {ENV_SH}` yourself")
+    if own_state and paths != before_paths:
+        save_state(state)
     return changed
 
 
@@ -811,7 +824,10 @@ def do_sync(
     write_env_sh(state)
     manifest = write_manifest(recipes, state, w)
     agents = sync_agents(manifest, recipes, only_detected=not all_agents)
-    wired = wire_shells() if wire else []
+    before_wired = list(state.get("wired_shell_files", []))
+    wired = wire_shells(state) if wire else []
+    if state.get("wired_shell_files", []) != before_wired:
+        save_state(state)
     if not quiet:
         info(f"  shims: {', '.join(sorted(p.name for p in BIN.iterdir()))}")
         info(f"  agents configured: {', '.join(agents) or '(none detected)'}")
@@ -1691,7 +1707,9 @@ def cmd_wire(args) -> int:
         run(["launchctl", "setenv", "PATH", path])
         info("✓ GUI PATH set (experimental). Quit and reopen desktop apps to pick it up.")
         return 0
-    changed = wire_shells()
+    state = load_state(load_recipes())
+    changed = wire_shells(state)
+    save_state(state)
     info("✓ shell files updated: " + (", ".join(changed) if changed else "already wired"))
     return 0
 
@@ -1824,7 +1842,7 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
 
     args = p.parse_args(argv)
     mutating = (
-        args.cmd in ("install", "need", "sync", "uninstall")
+        args.cmd in ("install", "need", "sync", "wire", "uninstall")
         or (args.cmd == "upgrade" and not args.dry_run)
         or (args.cmd == "doctor" and args.fix)
     )
