@@ -30,6 +30,7 @@ class ZdotdirTests(unittest.TestCase):
                 patch.dict(os.environ, {"ZDOTDIR": str(zdot)}),
                 patch.object(u, "HOME", home),
                 patch.object(u, "UNIENV_HOME", unienv_home),
+                patch.object(u, "STATE_FILE", unienv_home / "state.json"),
                 patch.object(u, "ENV_SH", env_sh),
                 patch.object(u, "SHELL_FILES", shell_files),
             ):
@@ -52,6 +53,55 @@ class ZdotdirTests(unittest.TestCase):
                 self.assertIsNone(u.read_block(zdot / ".zshenv", u.SHELL_BEGIN, u.SHELL_END))
                 self.assertIsNone(u.read_block(home / ".zshenv", u.SHELL_BEGIN, u.SHELL_END))
 
+    def test_wired_zdotdir_survives_cmd_need_without_zdotdir_and_is_removed_by_uninstall(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            zdot = home / ".config/zsh"
+            unienv_home = home / ".unienv"
+            env_sh = unienv_home / "env.sh"
+            shell_files = [home / ".zshenv", home / ".profile"]
+
+            with (
+                patch.object(u, "HOME", home),
+                patch.object(u, "UNIENV_HOME", unienv_home),
+                patch.object(u, "STATE_FILE", unienv_home / "state.json"),
+                patch.object(u, "BACKUP_DIR", unienv_home / "backups"),
+                patch.object(u, "BIN", unienv_home / "bin"),
+                patch.object(u, "PY_DIR", unienv_home / "py"),
+                patch.object(u, "NODE_DIR", unienv_home / "node"),
+                patch.object(u, "MANIFEST_FILE", unienv_home / "manifest.json"),
+                patch.object(u, "LOG_FILE", unienv_home / "log" / "events.jsonl"),
+                patch.object(u, "ENV_SH", env_sh),
+                patch.object(u, "SHELL_FILES", shell_files),
+                patch.object(u, "agent_targets", return_value=[]),
+                patch.object(u, "mcp_clients", return_value={}),
+                patch.object(u, "LAUNCH_AGENT", home / "none.plist"),
+                patch.object(u, "install_node", return_value=None),
+                patch.object(u, "write_shims", return_value=None),
+                patch.object(u, "sync_agents", return_value=[]),
+                patch.object(u, "write_manifest", return_value={}),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                (unienv_home / "bin").mkdir(parents=True, exist_ok=True)
+                with patch.dict(os.environ, {"ZDOTDIR": str(zdot)}):
+                    u.cmd_wire(argparse.Namespace(gui=False))
+                self.assertIsNotNone(u.read_block(zdot / ".zshenv", u.SHELL_BEGIN, u.SHELL_END))
+
+                # Run `unienv need left-pad --node` from a shell without ZDOTDIR
+                with patch.dict(os.environ, {"ZDOTDIR": ""}):
+                    rc = u.cmd_need(
+                        argparse.Namespace(packages=["left-pad"], node=True, bin=False, cask=False, yes=True)
+                    )
+                    self.assertEqual(rc, 0)
+                    saved = json.loads((unienv_home / "state.json").read_text())
+                    self.assertIn(str((zdot / ".zshenv").resolve()), saved["wired_shell_files"])
+
+                    # Now run uninstall without ZDOTDIR: block in $ZDOTDIR/.zshenv must be removed
+                    u.cmd_uninstall(argparse.Namespace(purge=False))
+
+                self.assertIsNone(u.read_block(zdot / ".zshenv", u.SHELL_BEGIN, u.SHELL_END))
+                self.assertIsNone(u.read_block(home / ".zshenv", u.SHELL_BEGIN, u.SHELL_END))
+
     def test_zdotdir_equal_to_home_is_not_duplicated(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -59,6 +109,7 @@ class ZdotdirTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"ZDOTDIR": str(home)}),
                 patch.object(u, "HOME", home),
+                patch.object(u, "STATE_FILE", home / ".unienv" / "state.json"),
                 patch.object(u, "SHELL_FILES", shell_files),
             ):
                 self.assertIsNone(u._zdotdir())
