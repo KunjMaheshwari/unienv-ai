@@ -70,6 +70,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          # Include nodejs/npm via apt so `unienv update` (which runs install_system
+          # and checks dpkg-query status) sees them as dpkg-installed on the runner.
           sudo apt-get install -y pandoc poppler-utils qpdf ghostscript tesseract-ocr jq ripgrep nodejs npm
 
       - name: Install (macOS without LibreOffice to keep CI fast)

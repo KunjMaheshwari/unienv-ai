@@ -252,7 +252,12 @@ def remove_block(path: Path, begin: str, end: str) -> bool:
     new = old
     for match in reversed(list(pattern.finditer(old))):
         start = match.start()
-        if _block_layout_marker(begin) in match.group(0).splitlines() and start and old[start - 1] == "\n":
+        if (
+            _block_layout_marker(begin) in match.group(0).splitlines()
+            and match.end() == len(old)
+            and start
+            and old[start - 1] == "\n"
+        ):
             start -= 1
         new = new[:start] + new[match.end() :]
     if new == old:

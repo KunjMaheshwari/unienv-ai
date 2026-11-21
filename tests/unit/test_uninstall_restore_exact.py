@@ -100,6 +100,16 @@ class UninstallRestoreExactTests(unittest.TestCase):
                 self.assertEqual(zshenv.read_bytes(), b"export NO_TRAILING_NL=1")
                 self.assertIsNone(u.read_block(zshenv, u.SHELL_BEGIN, u.SHELL_END))
 
+    def test_file_without_trailing_newline_keeps_newline_when_content_appended_after_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / ".profile"
+            path.write_bytes(b"export A=1")
+            u.upsert_block(path, '. "$HOME/.unienv/env.sh"', u.SHELL_BEGIN, u.SHELL_END)
+            with path.open("ab") as f:
+                f.write(b'. "$HOME/.cargo/env"\n')
+            self.assertTrue(u.remove_block(path, u.SHELL_BEGIN, u.SHELL_END))
+            self.assertEqual(path.read_bytes(), b'export A=1\n. "$HOME/.cargo/env"\n')
+
 
 if __name__ == "__main__":
     unittest.main()
