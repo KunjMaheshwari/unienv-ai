@@ -25,7 +25,6 @@ import subprocess
 import sys
 import tarfile
 import time
-import tempfile
 import tomllib
 from pathlib import Path
 
@@ -989,7 +988,7 @@ def pick_batteries(recipes_all: dict, current: list[str]) -> list[str]:
                 selected ^= {choices[int(tok) - 1]}
 
 
-def cmd_install(args) -> int:
+def cmd_install(args, *, run_doctor: bool = True) -> int:
     recipes_all = load_recipes()
     first_run = not STATE_FILE.exists()
     state = load_state(recipes_all)
@@ -1036,6 +1035,8 @@ def cmd_install(args) -> int:
     log_event(event="install", batteries=[r["id"] for r in recipes], failures=failures)
     if failures:
         warn("Some system packages failed: " + ", ".join(failures))
+    if not run_doctor:
+        return 0
     step("Checking")
     rc = cmd_doctor(argparse.Namespace(json=False, fix=False, quiet_ok=True))
     info("\nOpen a new terminal (or restart your AI tools) so they pick up the new PATH.")
@@ -1378,8 +1379,12 @@ def validate_env_spec(doc: dict, recipes_all: dict) -> list[str]:
                 problems.append(f"unknown [extras] key: {k}")
             elif not isinstance(v, list) or not all(isinstance(x, str) for x in v):
                 problems.append(f"[extras].{k} must be a list of strings")
-            elif any(not _valid_import_package(k, package) for package in v):
-                problems.append(f"[extras].{k} contains an unsafe or unsupported package specification")
+            else:
+                for package in v:
+                    if not _valid_import_package(k, package):
+                        problems.append(
+                            f"[extras].{k} contains an unsafe or unsupported package specification: {package!r}"
+                        )
     return problems
 
 
@@ -1401,7 +1406,7 @@ def _valid_import_package(kind: str, value: str) -> bool:
         return bool(
             re.fullmatch(r"(?:@[A-Za-z0-9_.-]+/)?[A-Za-z0-9][A-Za-z0-9_.-]*(?:@[A-Za-z0-9.^~*<>=|_-]+)?", value)
         )
-    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+_.@/-]*", value))
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+_.@-]*", value))
 
 
 def cmd_import(args) -> int:
@@ -1424,14 +1429,30 @@ def cmd_import(args) -> int:
         state["extras"][kind] = uniq(doc.get("extras", {}).get(kind, []))
     info("Import plan:")
     info("  batteries: " + ", ".join(state["batteries"]))
+    if state["options"]["exclude"]:
+        info("  exclude: " + ", ".join(state["options"]["exclude"]))
     for kind, packages in state["extras"].items():
         if packages:
             info(f"  {kind}: {', '.join(packages)}")
+        removed_extras = [p for p in previous.get("extras", {}).get(kind, []) if p not in packages]
+        if removed_extras:
+            info(f"  remove {kind}: {', '.join(removed_extras)}")
     if not args.yes:
-        try:
-            confirmed = input("Apply this environment? [y/N] ").strip().lower() in ("y", "yes")
-        except EOFError:
-            confirmed = False
+        confirmed = False
+        if args.file == "-":
+            tty = _tty()
+            if tty is not None:
+                with tty:
+                    tty.write("Apply this environment? [y/N] ")
+                    tty.flush()
+                    confirmed = tty.readline().strip().lower() in ("y", "yes")
+            else:
+                warn("cannot prompt for confirmation when reading from stdin without a TTY; pass -y/--yes")
+        else:
+            try:
+                confirmed = input("Apply this environment? [y/N] ").strip().lower() in ("y", "yes")
+            except EOFError:
+                confirmed = False
         if not confirmed:
             info("Import cancelled; no state changed.")
             return 1
@@ -1445,11 +1466,6 @@ def cmd_import(args) -> int:
     ]
     saved = {path: path.read_bytes() if path.exists() else None for path in tracked}
     dirs = {path: os.path.lexists(path) for path in (PY_DIR / ".venv", NODE_DIR / "node_modules")}
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    backup = Path(tempfile.mkdtemp(prefix="import-", dir=BACKUP_DIR))
-    for index, (path, content) in enumerate(saved.items()):
-        if content is not None:
-            (backup / str(index)).write_bytes(content)
 
     def restore_files():
         for path, content in saved.items():
@@ -1477,7 +1493,8 @@ def cmd_import(args) -> int:
                 no_wire=args.no_wire,
                 all_agents=False,
                 yes=args.yes,
-            )
+            ),
+            run_doctor=False,
         )
         if result:
             raise RuntimeError(f"installation returned {result}")
@@ -1495,8 +1512,14 @@ def cmd_import(args) -> int:
             warn(f"rollback repair failed ({repair_error}); run unienv install to repair")
         finally:
             restore_files()
+        if isinstance(exc, KeyboardInterrupt):
+            raise
         return 1
     log_event(event="import", batteries=state["batteries"])
+    step("Checking")
+    doctor_rc = cmd_doctor(argparse.Namespace(json=False, fix=False, quiet_ok=True))
+    if doctor_rc:
+        warn("Imported environment, but `unienv doctor` reported issues (see above).")
     info("Imported environment.")
     return 0
 
@@ -2282,7 +2305,7 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.add_argument("--no-system", action="store_true", help="skip Homebrew/apt packages")
     s.add_argument("--no-wire", action="store_true", help="don't edit shell startup files")
     s.add_argument("--all-agents", action="store_true", help="write instruction files even for agents not detected")
-    s.add_argument("-y", "--yes", action="store_true", help="allow sudo apt-get on Linux")
+    s.add_argument("-y", "--yes", action="store_true", help="skip confirmation prompt and allow sudo apt-get on Linux")
     s.set_defaults(fn=cmd_install)
 
     s = sub.add_parser("need", help="permanently add a missing package for every AI tool")
@@ -2321,7 +2344,7 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.add_argument("file", help="path to exported TOML file (or '-' for stdin)")
     s.add_argument("--no-system", action="store_true", help="skip Homebrew/apt packages")
     s.add_argument("--no-wire", action="store_true", help="don't edit shell startup files")
-    s.add_argument("-y", "--yes", action="store_true", help="allow sudo apt-get on Linux")
+    s.add_argument("-y", "--yes", action="store_true", help="skip confirmation prompt and allow sudo apt-get on Linux")
     s.set_defaults(fn=cmd_import)
 
     s = sub.add_parser("wire", help="(re)write shell startup blocks; --gui sets the macOS GUI PATH")
