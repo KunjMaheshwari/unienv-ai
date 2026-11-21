@@ -15,6 +15,7 @@ stdout carries protocol messages only.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import os
@@ -82,6 +83,72 @@ PANDOC_OUT = {
     "epub": "epub",
 }
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp"}
+_INLINE_IMAGE_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+MAX_INLINE_IMAGES = 4
+MAX_INLINE_IMAGE_BYTES = 512 * 1024
+MAX_INLINE_TOTAL_BYTES = 2 * 1024 * 1024
+
+
+def _valid_image(raw: bytes, mime: str) -> bool:
+    """Reject mismatched signatures and obviously truncated image containers."""
+    if mime == "image/png":
+        return (
+            len(raw) >= 45
+            and raw.startswith(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+            and int.from_bytes(raw[16:20], "big") > 0
+            and int.from_bytes(raw[20:24], "big") > 0
+            and raw.endswith(b"\x00\x00\x00\x00IEND\xaeB\x60\x82")
+        )
+    if mime == "image/jpeg":
+        return len(raw) >= 4 and raw.startswith(b"\xff\xd8\xff") and raw.endswith(b"\xff\xd9")
+    if mime == "image/gif":
+        return len(raw) >= 14 and raw[:6] in (b"GIF87a", b"GIF89a") and raw.endswith(b";")
+    if mime == "image/webp":
+        return (
+            len(raw) >= 20
+            and raw[:4] == b"RIFF"
+            and raw[8:12] == b"WEBP"
+            and int.from_bytes(raw[4:8], "little") + 8 == len(raw)
+        )
+    return False
+
+
+def _image_blocks(
+    paths: list[Path],
+    *,
+    max_images: int = MAX_INLINE_IMAGES,
+    max_file_bytes: int = MAX_INLINE_IMAGE_BYTES,
+    max_total_bytes: int = MAX_INLINE_TOTAL_BYTES,
+) -> list[dict]:
+    blocks: list[dict] = []
+    total = 0
+    for p in paths:
+        if len(blocks) >= max_images:
+            break
+        mime = _INLINE_IMAGE_MIME.get(p.suffix.lower())
+        if not mime:
+            continue
+        try:
+            if p.stat().st_size > max_file_bytes:
+                continue
+            raw = p.read_bytes()
+        except OSError:
+            continue
+        if not _valid_image(raw, mime) or len(raw) > max_file_bytes or total + len(raw) > max_total_bytes:
+            continue
+        total += len(raw)
+        blocks.append({"type": "image", "data": base64.b64encode(raw).decode("ascii"), "mimeType": mime})
+    return blocks
+
+
+def _with_images(text: str, image_blocks: list[dict]) -> str | list[dict]:
+    return [{"type": "text", "text": text}, *image_blocks] if image_blocks else text
 
 
 def log(msg: str) -> None:
@@ -184,13 +251,54 @@ def which(name: str) -> str | None:
     return shutil.which(name, path=tool_env()["PATH"])
 
 
+_READONLY_TOOLS = {"unienv_capabilities", "read_document", "convert_document"}
+
+
+def allowed_roots() -> list[Path] | None:
+    """Return resolved allowed root directories when UNIENV_MCP_ROOTS is set, else None."""
+    raw = os.environ.get("UNIENV_MCP_ROOTS", "").strip()
+    if not raw:
+        return None
+    roots = [Path(os.path.expanduser(part.strip())).resolve() for part in raw.split(os.pathsep) if part.strip()]
+    if not roots:
+        raise ToolError("UNIENV_MCP_ROOTS must contain at least one directory")
+    return roots
+
+
+def check_path_allowed(path: Path) -> Path:
+    """Resolve symlinks and verify path is inside UNIENV_MCP_ROOTS when configured."""
+    roots = allowed_roots()
+    if roots is None:
+        return path
+    resolved = path.resolve()
+    if not any(resolved == r or resolved.is_relative_to(r) for r in roots):
+        raise ToolError(f"path {path} is outside allowed UNIENV_MCP_ROOTS")
+    return resolved
+
+
+def active_tools() -> list[dict]:
+    """Return tools enabled by the server's configured policy."""
+    mode = os.environ.get("UNIENV_MCP_MODE", "").strip().lower()
+    if mode == "readonly":
+        return [t for t in TOOLS if t["name"] in _READONLY_TOOLS]
+    disabled = set()
+    # A cwd check cannot constrain arbitrary Python or command arguments.
+    if os.environ.get("UNIENV_MCP_ROOTS", "").strip():
+        disabled.update({"run_python", "run_tool", "install_package"})
+    allow_install = os.environ.get("UNIENV_MCP_ALLOW_INSTALL", "1").strip().lower()
+    if allow_install in ("0", "false", "no", "off"):
+        disabled.add("install_package")
+    return [t for t in TOOLS if t["name"] not in disabled]
+
+
 def resolve(path: str, *, base: Path | None = None) -> Path:
     p = Path(os.path.expanduser(path))
-    return p if p.is_absolute() else (base or WORKDIR) / p
+    target = p if p.is_absolute() else (base or WORKDIR) / p
+    return check_path_allowed(target)
 
 
 def workdir(cwd: str | None) -> Path:
-    d = resolve(cwd) if cwd else WORKDIR
+    d = resolve(cwd) if cwd else check_path_allowed(WORKDIR)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -343,11 +451,11 @@ def changed_files(d: Path, before: dict[str, float]) -> list[str]:
 
 def free_name(p: Path) -> Path:
     """Never overwrite: report.pdf -> report-1.pdf -> report-2.pdf ..."""
-    if not p.exists():
+    if not os.path.lexists(p):
         return p
     for i in range(1, 1000):
         q = p.with_name(f"{p.stem}-{i}{p.suffix}")
-        if not q.exists():
+        if not os.path.lexists(q):
             return q
     raise RuntimeError(f"no free file name for {p}")
 
@@ -398,12 +506,17 @@ def t_read_document(a: dict) -> str:
     if ext in {".txt", ".md", ".markdown", ".csv", ".json", ".yaml", ".yml", ".log", ".tsv", ".xml"}:
         return cap(path.read_text(errors="replace"), limit)
     if ext in IMAGE_EXT:
+        imgs = _image_blocks([path], max_file_bytes=MAX_INLINE_IMAGE_BYTES) if a.get("include_image") else []
         if not which("tesseract"):
+            if imgs:
+                return _with_images(f"[Image {path.name}]", imgs)
             raise ToolError("OCR needs tesseract: install_package(name='tesseract', kind='brew')")
         code, out, err, _ = run(["tesseract", str(path), "-"], cwd=path.parent, timeout=120)
         if code != 0:
+            if imgs:
+                return _with_images(f"[Image {path.name}]", imgs)
             raise ToolError(f"tesseract failed: {err.strip()[:500]}")
-        return cap(f"[OCR text of {path.name}]\n{out}", limit)
+        return _with_images(cap(f"[OCR text of {path.name}]\n{out}", limit), imgs)
     code, out, err, _ = run(
         [str(BIN / "ue-py"), *SAFE_PATH, "-m", "markitdown", str(path)], cwd=path.parent, timeout=180
     )
@@ -429,7 +542,12 @@ def t_convert_document(a: dict) -> str:
     if not src.exists():
         raise ToolError(f"file not found: {src}")
     fmt = a["output_format"].lower().lstrip(".")
-    out_dir = workdir(a.get("output_dir")) if a.get("output_dir") else src.parent
+    if not re.fullmatch(r"[a-z0-9]+", fmt):
+        raise ToolError("output_format must be a file format such as pdf or docx")
+    out_dir = resolve(a["output_dir"]) if a.get("output_dir") else src.parent
+    if os.environ.get("UNIENV_MCP_MODE", "").strip().lower() == "readonly":
+        if out_dir.resolve() not in {src.resolve().parent, WORKDIR.resolve()}:
+            raise ToolError("readonly conversions must write next to the source or into UNIENV_WORKDIR")
     out_dir.mkdir(parents=True, exist_ok=True)
     dest = free_name(out_dir / f"{src.stem}.{fmt}")
     ext = src.suffix.lower()
@@ -459,9 +577,11 @@ def t_convert_document(a: dict) -> str:
         return f"Converted to {len(paths)} files:\n" + "\n".join(str(p) for p in paths)
 
     def via_pandoc(input_path: Path, to: str, target: Path) -> Path:
-        code, out, err, _ = run(
-            ["pandoc", str(input_path), "-t", to, "-o", str(target)], cwd=input_path.parent, timeout=180
+        safe_mode = bool(os.environ.get("UNIENV_MCP_ROOTS", "").strip()) or (
+            os.environ.get("UNIENV_MCP_MODE", "").strip().lower() == "readonly"
         )
+        cmd = ["pandoc", *(["--sandbox"] if safe_mode else []), str(input_path), "-t", to, "-o", str(target)]
+        code, out, err, _ = run(cmd, cwd=input_path.parent, timeout=180)
         if code != 0:
             raise ToolError(f"pandoc failed: {err.strip()[:800]}")
         return target
@@ -494,7 +614,9 @@ def t_convert_document(a: dict) -> str:
                 pages_dir = free_name(out_dir / f"{src.stem}-pages")
                 pages_dir.mkdir()
                 pages = [Path(shutil.move(p, pages_dir / p.name)) for p in sorted(Path(tmp).iterdir())]
-            return f"Rendered {len(pages)} page(s) into {pages_dir}:\n" + "\n".join(str(p) for p in pages)
+            summary = f"Rendered {len(pages)} page(s) into {pages_dir}:\n" + "\n".join(str(p) for p in pages)
+            imgs = _image_blocks(pages, max_file_bytes=MAX_INLINE_IMAGE_BYTES) if a.get("include_images", True) else []
+            return _with_images(summary, imgs)
         raise ToolError("PDF can be converted to txt, png or jpg. To get editable text, use read_document.")
 
     if fmt == "pdf":
@@ -519,7 +641,7 @@ def t_convert_document(a: dict) -> str:
     )
 
 
-def t_run_python(a: dict) -> str:
+def t_run_python(a: dict) -> str | list[dict]:
     cwd = workdir(a.get("cwd"))
     before = snapshot(cwd)
     with tempfile.NamedTemporaryFile("w", suffix=".py", prefix="unienv_", dir=tool_env()["TMPDIR"], delete=False) as f:
@@ -531,7 +653,13 @@ def t_run_python(a: dict) -> str:
         )
     finally:
         os.unlink(script)
-    return _report(code, out, err, secs, cwd, before)
+    files = changed_files(cwd, before)
+    report = _report(code, out, err, secs, cwd, before, files=files)
+    if a.get("include_images", True):
+        new_files = [Path(p) for p in files]
+        imgs = _image_blocks([p for p in new_files if p.suffix.lower() in {".png", ".jpg", ".jpeg"}])
+        return _with_images(report, imgs)
+    return report
 
 
 def allowed_tools() -> dict[str, str]:
@@ -577,9 +705,12 @@ def t_install_package(a: dict) -> str:
     return cap(text, 4000)
 
 
-def _report(code: int, out: str, err: str, secs: float, cwd: Path, before: dict) -> str:
+def _report(
+    code: int, out: str, err: str, secs: float, cwd: Path, before: dict, *, files: list[str] | None = None
+) -> str:
     parts = [f"exit code: {code}  ({secs:.1f}s, cwd: {cwd})"]
-    files = changed_files(cwd, before)
+    if files is None:
+        files = changed_files(cwd, before)
     if files:
         parts.append("files created/modified:\n" + "\n".join(f"  {f}" for f in files))
     if out.strip():
@@ -614,6 +745,10 @@ TOOLS = [
             "properties": {
                 "path": {"type": "string", "description": "File path, e.g. ~/Downloads/report.pdf"},
                 "max_chars": {"type": "integer", "description": "Maximum characters to return (default 20000)"},
+                "include_image": {
+                    "type": "boolean",
+                    "description": "When reading an image file, also return the image itself inline",
+                },
             },
         },
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
@@ -634,6 +769,10 @@ TOOLS = [
                 "input_path": {"type": "string"},
                 "output_format": {"type": "string", "description": "pdf, docx, md, html, txt, xlsx, pptx, csv, png …"},
                 "output_dir": {"type": "string", "description": "Optional folder for the result"},
+                "include_images": {
+                    "type": "boolean",
+                    "description": "For PDF → PNG/JPG, attach up to 4 rendered page images inline (default true)",
+                },
             },
         },
         "annotations": {
@@ -659,6 +798,10 @@ TOOLS = [
                 "code": {"type": "string", "description": "Complete Python script"},
                 "cwd": {"type": "string", "description": "Working directory (default: the UniEnv working folder)"},
                 "timeout_s": {"type": "integer", "description": f"Default {DEFAULT_TIMEOUT}, max {MAX_TIMEOUT}"},
+                "include_images": {
+                    "type": "boolean",
+                    "description": "Attach newly created PNG/JPEG images inline (default true)",
+                },
             },
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True},
@@ -773,13 +916,21 @@ def handle(msg: dict) -> dict | None:
     if method == "ping":
         return ok({})
     if method == "tools/list":
-        return ok({"tools": [{k: v for k, v in t.items() if k != "fn"} for t in TOOLS]})
+        return ok({"tools": [{k: v for k, v in t.items() if k != "fn"} for t in active_tools()]})
     if method == "tools/call":
         tool_name = params.get("name")
         if not isinstance(tool_name, str):
             return error(-32602, "tool name must be a string")
-        tool = TOOL_INDEX.get(tool_name)
+        enabled = {t["name"]: t for t in active_tools()}
+        tool = enabled.get(tool_name)
         if tool is None:
+            if tool_name in TOOL_INDEX:
+                return ok(
+                    {
+                        "content": [{"type": "text", "text": f"tool '{tool_name}' is disabled by MCP safe mode"}],
+                        "isError": True,
+                    }
+                )
             return error(-32602, f"unknown tool: {tool_name}")
         raw_args = params.get("arguments")
         if raw_args is None:
@@ -805,12 +956,12 @@ def handle(msg: dict) -> dict | None:
             if pre_cancelled:
                 raise ToolError("cancelled")
             emit_progress(f"Starting {tool['name']}")
-            text, is_error = tool["fn"](args), False
+            res, is_error = tool["fn"](args), False
             emit_progress(f"Completed {tool['name']}")
         except ToolError as e:
-            text, is_error = str(e), True
+            res, is_error = str(e), True
         except Exception as e:  # never crash the server on a bad call
-            text, is_error = f"{type(e).__name__}: {e}", True
+            res, is_error = f"{type(e).__name__}: {e}", True
         finally:
             _CURRENT_CTX.request_id = None
             _CURRENT_CTX.progress_token = None
@@ -821,7 +972,8 @@ def handle(msg: dict) -> dict | None:
         if cancelled:
             return None
         log(f"{tool['name']} {'failed' if is_error else 'ok'} in {time.monotonic() - start:.1f}s")
-        return ok({"content": [{"type": "text", "text": text}], "isError": is_error})
+        content = res if isinstance(res, list) else [{"type": "text", "text": res}]
+        return ok({"content": content, "isError": is_error})
     if method in ("resources/list", "prompts/list"):
         return ok({method.split("/")[0]: []})
     return error(-32601, f"method not found: {method}")
