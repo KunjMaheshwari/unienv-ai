@@ -40,7 +40,7 @@ class HomebrewUpdateTests(unittest.TestCase):
         self.assertIn('depends_on "uv"', formula)
         self.assertNotIn('depends_on "python@3.12"', formula)
         self.assertIn("python find 3.12 --managed-python", formula)
-        self.assertIn('#{opt_libexec}/src/unienv.py', formula)
+        self.assertIn("#{opt_libexec}/src/unienv.py", formula)
         self.assertIn('libexec.install "src", "recipes", "templates", "shims"', formula)
         self.assertIn("unienv install", formula)
 
