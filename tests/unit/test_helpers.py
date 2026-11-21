@@ -122,7 +122,14 @@ class HelperTests(unittest.TestCase):
                 u.write_env_sh(state)
             text = env_sh.read_text(encoding="utf-8")
             self.assertIn("PLAYWRIGHT_BROWSERS_PATH", text)
-            self.assertIn("$UNIENV_HOME/share/browsers", text)
+            self.assertIn("$UNIENV_HOME/browsers", text)
+            self.assertNotIn("$UNIENV_HOME/share/browsers", text)
+
+            # When `browser` battery is not active, PLAYWRIGHT_BROWSERS_PATH is not exported
+            inactive_state = {"batteries": ["office"], "options": {"wire_homebrew": False}}
+            with patch.object(u, "UNIENV_HOME", unienv_home), patch.object(u, "ENV_SH", env_sh):
+                u.write_env_sh(inactive_state)
+            self.assertNotIn("PLAYWRIGHT_BROWSERS_PATH", env_sh.read_text(encoding="utf-8"))
 
     def test_excluded_system_packages_and_bins(self):
         from unittest.mock import patch

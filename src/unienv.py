@@ -489,7 +489,7 @@ def install_python(packages: list[str]) -> None:
 
 
 def install_browsers() -> None:
-    browsers_dir = UNIENV_HOME / "share" / "browsers"
+    browsers_dir = UNIENV_HOME / "browsers"
     browsers_dir.mkdir(parents=True, exist_ok=True)
     py = PY_DIR / ".venv/bin/python"
     if not py.exists():
@@ -579,7 +579,10 @@ def write_env_sh(state: dict) -> None:
     lines += [
         'case ":$PATH:" in *":$UNIENV_HOME/bin:"*) ;; *) PATH="$UNIENV_HOME/bin:$PATH" ;; esac',
         "export PATH",
-        'export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$UNIENV_HOME/share/browsers}"',
+    ]
+    if "browser" in state.get("batteries", []):
+        lines.append('export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$UNIENV_HOME/browsers}"')
+    lines += [
         "# `bash -c` (non-login, non-interactive) reads only $BASH_ENV.",
         '[ -z "${BASH_ENV:-}" ] && export BASH_ENV="$UNIENV_HOME/env.sh"',
     ]
