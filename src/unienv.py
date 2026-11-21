@@ -221,6 +221,10 @@ def _write_block_text(path: Path, text: str, eol: str) -> None:
         f.write(text.replace("\n", eol))
 
 
+def _block_layout_marker(begin: str) -> str:
+    return "# unienv:restore-no-final-newline" if begin.startswith("#") else "<!-- unienv:restore-no-final-newline -->"
+
+
 def _has_malformed_block(text: str, begin: str, end: str) -> bool:
     """True when begin/end markers are unbalanced or orphaned."""
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -238,21 +242,25 @@ def _has_malformed_block(text: str, begin: str, end: str) -> bool:
 
 
 def upsert_block(path: Path, body: str, begin: str, end: str, *, top: bool = False) -> bool:
-    """Insert or replace a marked block. Returns True if the file changed."""
+    """Insert or replace a block without losing the surrounding file's layout."""
     old, eol = _read_block_text(path) if path.exists() else ("", os.linesep)
     if _has_malformed_block(old, begin, end):
         warn(
             f"{path} has an incomplete UniEnv block (missing end marker); fix or remove the orphaned marker line first"
         )
         return False
-    block = f"{begin}\n{body.rstrip()}\n{end}\n"
-    pattern = re.compile(re.escape(begin) + r".*?" + re.escape(end) + r"\n?", re.S)
-    if pattern.search(old):
+    pattern = re.compile(re.escape(begin) + r"\n.*?" + re.escape(end) + r"(?:\n|$)", re.S)
+    match = pattern.search(old)
+    marker = _block_layout_marker(begin)
+    restore_eof = marker in match.group(0).splitlines() if match else bool(old and not top and not old.endswith("\n"))
+    prefix = marker + "\n" if restore_eof else ""
+    block = f"{begin}\n{prefix}{body.rstrip()}\n{end}\n"
+    if match:
         new = pattern.sub(lambda _: block, old, count=1)
     elif top:
-        new = block + ("\n" + old if old else "")
+        new = block + old
     else:
-        new = old + ("\n" if old and not old.endswith("\n") else "") + ("\n" if old else "") + block
+        new = old + ("\n" if restore_eof else "") + block
     if new == old:
         return False
     _write_block_text(path, new, eol)
@@ -268,8 +276,18 @@ def remove_block(path: Path, begin: str, end: str) -> bool:
             f"{path} has an incomplete UniEnv block (missing end marker); fix or remove the orphaned marker line first"
         )
         return False
-    new = re.sub(r"\n?" + re.escape(begin) + r".*?" + re.escape(end) + r"\n?", "\n", old, flags=re.S)
-    new = new.strip("\n") + ("\n" if new.strip() else "")
+    pattern = re.compile(re.escape(begin) + r"\n.*?" + re.escape(end) + r"(?:\n|$)", re.S)
+    new = old
+    for match in reversed(list(pattern.finditer(old))):
+        start = match.start()
+        if (
+            _block_layout_marker(begin) in match.group(0).splitlines()
+            and match.end() == len(old)
+            and start
+            and old[start - 1] == "\n"
+        ):
+            start -= 1
+        new = new[:start] + new[match.end() :]
     if new == old:
         return False
     _write_block_text(path, new, eol)
@@ -311,7 +329,11 @@ def read_block(path: Path, begin: str, end: str) -> str | None:
     if _has_malformed_block(text, begin, end):
         return None
     m = re.search(re.escape(begin) + r"\n(.*?)\n" + re.escape(end), text, re.S)
-    return m.group(1) if m else None
+    if not m:
+        return None
+    body = m.group(1)
+    prefix = _block_layout_marker(begin) + "\n"
+    return body[len(prefix) :] if body.startswith(prefix) else body
 
 
 # ── recipes & state ─────────────────────────────────────────────────────────
@@ -907,7 +929,7 @@ def _fish_conf_path() -> Path:
 def _nu_config_dir() -> Path:
     if os.environ.get("XDG_CONFIG_HOME", "").strip():
         return _config_home() / "nushell"
-    nu = which("nu")
+    nu = which("nu") if HOME == Path.home() else None
     if nu:
         try:
             result = subprocess.run([nu, "-c", "$nu.default-config-dir"], capture_output=True, text=True, timeout=5)
@@ -965,7 +987,7 @@ def render_nu_body(state: dict | None = None) -> str:
     lines.append('$env.PATH = ($env.PATH | prepend $"($env.UNIENV_HOME)/bin" | uniq)')
     if IS_MAC:
         lines.append(
-            'if ("TMPDIR" not-in $env) or ($env.TMPDIR | str starts-with "/tmp") { '
+            'if ("TMPDIR" not-in $env) or ($env.TMPDIR == "/tmp") or ($env.TMPDIR | str starts-with "/tmp/") { '
             "$env.TMPDIR = $\"/private($env.TMPDIR? | default '/tmp')\" }"
         )
     return "\n".join(lines)
@@ -995,7 +1017,13 @@ def _shell_files(state: dict | None = None) -> list[Path]:
     if state is None:
         state = load_state(load_recipes()) if STATE_FILE.exists() else {}
     for raw in state.get("wired_shell_files", []):
-        if isinstance(raw, str) and Path(raw).is_absolute() and Path(raw) not in files and Path(raw).exists():
+        if (
+            isinstance(raw, str)
+            and Path(raw).is_absolute()
+            and not raw.endswith(("unienv.fish", "unienv.nu"))
+            and Path(raw) not in files
+            and Path(raw).exists()
+        ):
             files.append(Path(raw))
     return files
 
@@ -1022,8 +1050,8 @@ def wire_shells(state: dict | None = None) -> list[str]:
                     paths.append(saved)
         except OSError as e:
             warn(f"could not update {rc} ({e}); add `source {ENV_SH}` yourself")
-    if _fish_conf_path().parent.parent.exists() or which("fish"):
-        fish_conf = _fish_conf_path()
+    fish_conf = _fish_conf_path()
+    if fish_conf.parent.parent.exists() or which("fish"):
         fish_text = render_fish_conf(state)
         try:
             old = fish_conf.read_text(encoding="utf-8", errors="surrogateescape") if fish_conf.exists() else None
@@ -1031,19 +1059,27 @@ def wire_shells(state: dict | None = None) -> list[str]:
                 fish_conf.parent.mkdir(parents=True, exist_ok=True)
                 atomic_write(fish_conf, fish_text)
                 changed.append(str(fish_conf).replace(str(HOME), "~"))
+            saved_fish = str(fish_conf.resolve())
+            if saved_fish not in paths:
+                paths.append(saved_fish)
         except OSError as e:
             warn(f"could not update {fish_conf} ({e})")
-    if _nu_config_dir().exists() or which("nu"):
+    nu_dir = _nu_config_dir()
+    if nu_dir.exists() or which("nu"):
         nu_body = render_nu_body(state)
-        if _nu_env_path().exists():
+        nu_env = nu_dir / "env.nu"
+        if nu_env.exists():
             try:
-                remove_block(_nu_env_path(), SHELL_BEGIN, SHELL_END)
+                remove_block(nu_env, SHELL_BEGIN, SHELL_END)
             except OSError as e:
-                warn(f"could not clean legacy block from {_nu_env_path()} ({e})")
-        nu_path = _nu_autoload_path()
+                warn(f"could not clean legacy block from {nu_env} ({e})")
+        nu_path = nu_dir / "autoload/unienv.nu"
         try:
             if upsert_block(nu_path, nu_body, SHELL_BEGIN, SHELL_END):
                 changed.append(str(nu_path).replace(str(HOME), "~"))
+            saved_nu = str(nu_path.resolve())
+            if saved_nu not in paths:
+                paths.append(saved_nu)
         except OSError as e:
             warn(f"could not update {nu_path} ({e})")
     if own_state and paths != before_paths:
@@ -2143,21 +2179,22 @@ def cmd_uninstall(args) -> int:
                 info(f"  removed block from {rc}")
         except OSError as e:
             warn(f"could not update {rc} ({e}); remove the UniEnv block manually")
-    fish_conf = _fish_conf_path()
-    if fish_conf.exists():
-        try:
-            fish_conf.unlink()
-            info(f"  removed {fish_conf}")
-        except OSError as e:
-            warn(f"could not remove {fish_conf} ({e})")
-    nu_autoload = _nu_autoload_path()
-    if nu_autoload.exists():
-        try:
-            nu_autoload.unlink()
-            info(f"  removed {nu_autoload}")
-        except OSError as e:
-            warn(f"could not remove {nu_autoload} ({e})")
-    nu_env = _nu_env_path()
+    nu_dir = _nu_config_dir()
+    saved_state = load_state(load_recipes()) if STATE_FILE.exists() else {}
+    unlink_targets: list[Path] = [_fish_conf_path(), nu_dir / "autoload/unienv.nu"]
+    for raw in saved_state.get("wired_shell_files", []):
+        if isinstance(raw, str) and raw.endswith(("unienv.fish", "unienv.nu")):
+            p = Path(raw)
+            if p not in unlink_targets:
+                unlink_targets.append(p)
+    for target_file in unlink_targets:
+        if target_file.exists():
+            try:
+                target_file.unlink()
+                info(f"  removed {target_file}")
+            except OSError as e:
+                warn(f"could not remove {target_file} ({e})")
+    nu_env = nu_dir / "env.nu"
     if nu_env.exists():
         try:
             if remove_block(nu_env, SHELL_BEGIN, SHELL_END):

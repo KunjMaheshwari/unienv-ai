@@ -66,4 +66,4 @@ unienv uninstall --purge   # ...and delete ~/.unienv
 
 Homebrew/apt packages are left installed; remove them with `brew uninstall` if you want.
 
-Fish uses XDG_CONFIG_HOME/fish when configured. Nushell uses its reported default config directory (on macOS, ~/Library/Application Support/nushell) and one autoload/unienv.nu file. Nushell non-interactive nu -c does not load interactive autoload files: explicitly source unienv.nu or inherit UniEnv's environment when launching agent commands.
+Fish uses XDG_CONFIG_HOME/fish when configured. Nushell uses its reported default config directory (on macOS, ~/Library/Application Support/nushell) and one autoload/unienv.nu file (Nushell 0.100.0+ automatically loads files in the config directory's `autoload/` folder). Nushell non-interactive nu -c does not load interactive autoload files: explicitly source unienv.nu or inherit UniEnv's environment when launching agent commands.
