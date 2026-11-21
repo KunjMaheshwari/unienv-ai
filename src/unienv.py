@@ -221,6 +221,10 @@ def _write_block_text(path: Path, text: str, eol: str) -> None:
         f.write(text.replace("\n", eol))
 
 
+def _block_layout_marker(begin: str) -> str:
+    return "# unienv:restore-no-final-newline" if begin.startswith("#") else "<!-- unienv:restore-no-final-newline -->"
+
+
 def _has_malformed_block(text: str, begin: str, end: str) -> bool:
     """True when begin/end markers are unbalanced or orphaned."""
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -238,21 +242,25 @@ def _has_malformed_block(text: str, begin: str, end: str) -> bool:
 
 
 def upsert_block(path: Path, body: str, begin: str, end: str, *, top: bool = False) -> bool:
-    """Insert or replace a marked block. Returns True if the file changed."""
+    """Insert or replace a block without losing the surrounding file's layout."""
     old, eol = _read_block_text(path) if path.exists() else ("", os.linesep)
     if _has_malformed_block(old, begin, end):
         warn(
             f"{path} has an incomplete UniEnv block (missing end marker); fix or remove the orphaned marker line first"
         )
         return False
-    block = f"{begin}\n{body.rstrip()}\n{end}\n"
-    pattern = re.compile(re.escape(begin) + r".*?" + re.escape(end) + r"\n?", re.S)
-    if pattern.search(old):
+    pattern = re.compile(re.escape(begin) + r"\n.*?" + re.escape(end) + r"(?:\n|$)", re.S)
+    match = pattern.search(old)
+    marker = _block_layout_marker(begin)
+    restore_eof = marker in match.group(0).splitlines() if match else bool(old and not top and not old.endswith("\n"))
+    prefix = marker + "\n" if restore_eof else ""
+    block = f"{begin}\n{prefix}{body.rstrip()}\n{end}\n"
+    if match:
         new = pattern.sub(lambda _: block, old, count=1)
     elif top:
-        new = block + ("\n" + old if old else "")
+        new = block + old
     else:
-        new = old + ("\n" if old and not old.endswith("\n") else "") + ("\n" if old else "") + block
+        new = old + ("\n" if restore_eof else "") + block
     if new == old:
         return False
     _write_block_text(path, new, eol)
@@ -268,8 +276,18 @@ def remove_block(path: Path, begin: str, end: str) -> bool:
             f"{path} has an incomplete UniEnv block (missing end marker); fix or remove the orphaned marker line first"
         )
         return False
-    new = re.sub(r"\n?" + re.escape(begin) + r".*?" + re.escape(end) + r"\n?", "\n", old, flags=re.S)
-    new = new.strip("\n") + ("\n" if new.strip() else "")
+    pattern = re.compile(re.escape(begin) + r"\n.*?" + re.escape(end) + r"(?:\n|$)", re.S)
+    new = old
+    for match in reversed(list(pattern.finditer(old))):
+        start = match.start()
+        if (
+            _block_layout_marker(begin) in match.group(0).splitlines()
+            and match.end() == len(old)
+            and start
+            and old[start - 1] == "\n"
+        ):
+            start -= 1
+        new = new[:start] + new[match.end() :]
     if new == old:
         return False
     _write_block_text(path, new, eol)
@@ -311,7 +329,11 @@ def read_block(path: Path, begin: str, end: str) -> str | None:
     if _has_malformed_block(text, begin, end):
         return None
     m = re.search(re.escape(begin) + r"\n(.*?)\n" + re.escape(end), text, re.S)
-    return m.group(1) if m else None
+    if not m:
+        return None
+    body = m.group(1)
+    prefix = _block_layout_marker(begin) + "\n"
+    return body[len(prefix) :] if body.startswith(prefix) else body
 
 
 # ── recipes & state ─────────────────────────────────────────────────────────
@@ -522,21 +544,33 @@ def install_python(packages: list[str]) -> None:
         [uv, "sync", "--project", str(PY_DIR), "--managed-python", "--quiet"],
         env={"UV_PROJECT_ENVIRONMENT": str(PY_DIR / ".venv")},
     )
-    if any(py_name(p) == "playwright" for p in packages):
-        install_browsers()
 
 
-def install_browsers() -> None:
-    browsers_dir = UNIENV_HOME / "browsers"
+def install_browsers(*, assume_yes: bool = False) -> None:
+    custom = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
+    browsers_dir = Path(custom).expanduser() if custom else UNIENV_HOME / "browsers"
     browsers_dir.mkdir(parents=True, exist_ok=True)
     py = PY_DIR / ".venv/bin/python"
     if not py.exists():
         return
-    run(
+    r = run(
         [str(py), "-P", "-m", "playwright", "install", "chromium"],
         env={"PLAYWRIGHT_BROWSERS_PATH": str(browsers_dir)},
         check=False,
     )
+    if r.returncode != 0:
+        warn(
+            f"playwright browser download failed (exit {r.returncode}); "
+            f"run `PLAYWRIGHT_BROWSERS_PATH={browsers_dir} ue-py -m playwright install chromium`"
+        )
+    if platform_key() == "debian":
+        deps_cmd = [str(py), "-P", "-m", "playwright", "install-deps", "chromium"]
+        if assume_yes or os.geteuid() == 0:
+            cmd = deps_cmd if os.geteuid() == 0 else ["sudo", *deps_cmd]
+            if run(cmd, check=False).returncode != 0:
+                warn("playwright install-deps failed; run: " + " ".join(cmd))
+        else:
+            warn("Browser system libraries needed on Linux. Run:\n    sudo " + " ".join(deps_cmd))
 
 
 def write_package_json(packages: list[str]) -> None:
@@ -1025,6 +1059,8 @@ def cmd_install(args) -> int:
         failures = install_system(w, assume_yes=args.yes)
     step(f"Python {PY_VERSION} environment ({len(w['python'])} packages)")
     install_python(w["python"])
+    if "browser" in state.get("batteries", []):
+        install_browsers(assume_yes=args.yes)
     step(f"Node packages ({len(w['node'])})")
     install_node(w["node"])
     step("Wiring shells and AI tools")
