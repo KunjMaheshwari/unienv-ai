@@ -18,7 +18,16 @@
   },
   "license": "MIT OR Apache-2.0",
   "icon": "icon.png",
-  "keywords": ["documents", "docx", "xlsx", "pptx", "pdf", "ocr", "python", "local"],
+  "keywords": [
+    "documents",
+    "docx",
+    "xlsx",
+    "pptx",
+    "pdf",
+    "ocr",
+    "python",
+    "local"
+  ],
   "server": {
     "type": "binary",
     "entry_point": "server/unienv-mcp.sh",
@@ -26,17 +35,38 @@
       "command": "${__dirname}/server/unienv-mcp.sh",
       "args": [],
       "env": {
-        "UNIENV_WORKDIR": "${user_config.workdir}"
+        "UNIENV_WORKDIR": "${user_config.workdir}",
+        "UNIENV_MCP_MODE": "${user_config.mode}",
+        "UNIENV_MCP_ALLOW_INSTALL": "${user_config.allow_install}",
+        "UNIENV_MCP_ROOTS": "${user_config.roots}"
       }
     }
   },
   "tools": [
-    { "name": "unienv_capabilities", "description": "List the pre-installed tools and packages, with usage notes" },
-    { "name": "read_document", "description": "Read Word, Excel, PowerPoint, PDF, HTML or image (OCR) files as text" },
-    { "name": "convert_document", "description": "Convert documents, e.g. docx → pdf, md → docx, pdf → txt/png" },
-    { "name": "run_python", "description": "Run Python with python-docx, openpyxl, python-pptx, pandas, matplotlib and more" },
-    { "name": "run_tool", "description": "Run pandoc, LibreOffice, Poppler, qpdf, tesseract and other UniEnv tools" },
-    { "name": "install_package", "description": "Permanently add a missing package for every AI tool" }
+    {
+      "name": "unienv_capabilities",
+      "description": "List the pre-installed tools and packages, with usage notes"
+    },
+    {
+      "name": "read_document",
+      "description": "Read Word, Excel, PowerPoint, PDF, HTML or image (OCR) files as text"
+    },
+    {
+      "name": "convert_document",
+      "description": "Convert documents, e.g. docx → pdf, md → docx, pdf → txt/png"
+    },
+    {
+      "name": "run_python",
+      "description": "Run Python with python-docx, openpyxl, python-pptx, pandas, matplotlib and more"
+    },
+    {
+      "name": "run_tool",
+      "description": "Run pandoc, LibreOffice, Poppler, qpdf, tesseract and other UniEnv tools"
+    },
+    {
+      "name": "install_package",
+      "description": "Permanently add a missing package for every AI tool"
+    }
   ],
   "user_config": {
     "workdir": {
@@ -45,9 +75,33 @@
       "description": "Where new files go when Claude doesn't give a path.",
       "required": false,
       "default": "${HOME}/UniEnv"
+    },
+    "mode": {
+      "type": "string",
+      "title": "MCP mode",
+      "description": "Use full for all tools or readonly for reading and conversion only. Readonly conversions write next to the source or into the output folder.",
+      "required": false,
+      "default": "full"
+    },
+    "allow_install": {
+      "type": "boolean",
+      "title": "Allow package installation",
+      "description": "Permit install_package in full mode when no folder restrictions are configured.",
+      "required": false,
+      "default": true
+    },
+    "roots": {
+      "type": "string",
+      "title": "Allowed folders",
+      "description": "Colon-separated absolute folders or ~/ paths, for example ~/Documents:~/UniEnv. Empty means unrestricted. Setting folders disables code execution, command execution, and installation.",
+      "required": false,
+      "default": ""
     }
   },
   "compatibility": {
-    "platforms": ["darwin", "linux"]
+    "platforms": [
+      "darwin",
+      "linux"
+    ]
   }
 }
