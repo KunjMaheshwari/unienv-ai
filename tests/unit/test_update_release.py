@@ -168,6 +168,40 @@ class UpdateReleaseTests(unittest.TestCase):
             self.assertEqual(cm2.exception.code, 1)
             self.assertIn("SHA256SUMS", err2.getvalue())
 
+            # Missing release tarball asset also fails closed without falling back to archive/
+            import urllib.error
+            from email.message import Message
+
+            requested = []
+
+            @contextlib.contextmanager
+            def fake_urlopen_missing_asset(req_or_url, *args, **kwargs):
+                url = req_or_url.full_url if hasattr(req_or_url, "full_url") else str(req_or_url)
+                requested.append(url)
+                if "SHA256SUMS" in url:
+                    yield io.BytesIO(f"{'a' * 64}  unienv-ai-v0.3.0.tar.gz\n".encode("utf-8"))
+                else:
+                    raise urllib.error.HTTPError(url=url, code=404, msg="Not Found", hdrs=Message(), fp=None)
+
+            err3 = io.StringIO()
+            with (
+                patch.object(u, "UNIENV_HOME", home),
+                patch.object(urllib.request, "urlopen", side_effect=fake_urlopen_missing_asset),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(err3),
+            ):
+                with self.assertRaises(SystemExit) as cm3:
+                    u.cmd_update(argparse.Namespace(check=False, ref="v0.3.0", sha256=None, no_wire=True))
+            self.assertEqual(cm3.exception.code, 1)
+            self.assertEqual(
+                requested,
+                [
+                    "https://github.com/rupeshbharambe24/unienv-ai/releases/download/v0.3.0/SHA256SUMS",
+                    "https://github.com/rupeshbharambe24/unienv-ai/releases/download/v0.3.0/unienv-ai-v0.3.0.tar.gz",
+                ],
+            )
+            self.assertIn("could not download UniEnv ref 'v0.3.0'", err3.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

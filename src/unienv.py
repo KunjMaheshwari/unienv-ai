@@ -1441,14 +1441,7 @@ def cmd_update(args) -> int:
             with urllib.request.urlopen(url) as resp, archive.open("wb") as out:
                 shutil.copyfileobj(resp, out)
         except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
-            if not is_release:
-                die(f"could not download UniEnv ref {ref!r} ({e}); check the branch or tag name")
-            fallback_url = REPO_TARBALL.format(ref=ref)
-            try:
-                with urllib.request.urlopen(fallback_url) as resp, archive.open("wb") as out:
-                    shutil.copyfileobj(resp, out)
-            except (urllib.error.HTTPError, urllib.error.URLError, OSError):
-                die(f"could not download UniEnv ref {ref!r} ({e}); check the branch or tag name")
+            die(f"could not download UniEnv ref {ref!r} ({e}); check the branch or tag name")
         if expected_sha:
             actual_sha = hashlib.sha256(archive.read_bytes()).hexdigest().lower()
             if actual_sha != expected_sha.lower():
