@@ -1215,7 +1215,7 @@ def cmd_remove(args) -> int:
             install_python(w["python"])
         elif kind == "node":
             if w["node"]:
-                install_node(w["node"])
+                install_node(w["node"], require_npm=True)
             elif (NODE_DIR / "package.json").exists():
                 write_package_json([])
                 shutil.rmtree(NODE_DIR / "node_modules", ignore_errors=True)
@@ -1229,11 +1229,23 @@ def cmd_remove(args) -> int:
                 info(f"  removed from UniEnv extras; to also uninstall from Homebrew, run: {' '.join(cmd)}")
         elif kind == "apt" and to_uninstall:
             cmd = ["sudo", "apt-get", "remove", "-y", *to_uninstall]
-            if args.yes or os.geteuid() == 0:
+            if args.yes:
+                sim = run(["apt-get", "-s", "remove", *to_uninstall], capture=True, check=False)
+                extra_removed = [
+                    m.group(1)
+                    for m in re.finditer(r"(?m)^Remv\s+(\S+)", sim.stdout or "")
+                    if m.group(1) not in to_uninstall
+                ]
+                if extra_removed:
+                    warn(
+                        "aborting apt-get remove because it would also remove dependent packages: "
+                        + ", ".join(extra_removed)
+                    )
+                    raise RuntimeError("apt-get remove would remove extra packages")
                 run(cmd[1:] if os.geteuid() == 0 else cmd)
             else:
                 info(f"  removed from UniEnv extras; to also uninstall from apt, run: {' '.join(cmd)}")
-    except (subprocess.CalledProcessError, RuntimeError, SystemExit) as e:
+    except BaseException as e:
         warn(f"remove failed ({e}); rolling back")
         for f in tracked:
             if existed[f]:
@@ -1249,6 +1261,8 @@ def cmd_remove(args) -> int:
         except (subprocess.CalledProcessError, RuntimeError, SystemExit) as re_err:
             warn(f"rollback re-install failed ({re_err}); run unienv install to repair")
         log_event(event="remove-failed", kind=kind, packages=removed)
+        if not isinstance(e, (subprocess.CalledProcessError, RuntimeError, SystemExit)):
+            raise
         return 1
 
     save_state(state)

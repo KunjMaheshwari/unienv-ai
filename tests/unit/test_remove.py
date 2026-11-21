@@ -185,6 +185,76 @@ class RemoveTests(unittest.TestCase):
             self.assertNotIn("brew uninstall", out.getvalue())
             self.assertEqual(json.loads(u.STATE_FILE.read_text())["extras"]["brew"], [])
 
+    def test_apt_remove_aborts_when_simulation_shows_dependent_packages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            state_file = home / "state.json"
+            state = {
+                "version": u.VERSION,
+                "batteries": ["ocr"],
+                "extras": {"python": [], "node": [], "brew": [], "cask": [], "apt": ["tesseract-ocr-eng"]},
+                "options": {"wire_homebrew": True, "wire_shells": True, "exclude": []},
+            }
+            state_file.write_text(json.dumps(state, indent=2) + "\n")
+            cmds = []
+
+            def fake_run(cmd, **kw):
+                cmds.append(cmd)
+                if cmd[:3] == ["apt-get", "-s", "remove"]:
+                    return subprocess.CompletedProcess(
+                        cmd,
+                        0,
+                        "Remv tesseract-ocr [5.3.0]\nRemv tesseract-ocr-eng [4.1.0]\n",
+                        "",
+                    )
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            err = io.StringIO()
+            with (
+                patch.object(u, "UNIENV_HOME", home),
+                patch.object(u, "STATE_FILE", state_file),
+                patch.object(u, "BACKUP_DIR", home / "backups"),
+                patch.object(u, "PY_DIR", home / "py"),
+                patch.object(u, "NODE_DIR", home / "node"),
+                patch.object(u, "LOG_FILE", home / "log" / "events.jsonl"),
+                patch.object(u, "platform_key", return_value="debian"),
+                patch.object(u, "run", side_effect=fake_run),
+                contextlib.redirect_stderr(err),
+            ):
+                rc = u.cmd_remove(
+                    argparse.Namespace(packages=["tesseract-ocr-eng"], node=False, bin=True, cask=False, yes=True)
+                )
+            self.assertEqual(rc, 1)
+            self.assertIn("tesseract-ocr", err.getvalue())
+            self.assertEqual(len(cmds), 1)
+
+    def test_apt_remove_requires_yes_even_as_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            state_file = home / "state.json"
+            state = {
+                "version": u.VERSION,
+                "batteries": [],
+                "extras": {"python": [], "node": [], "brew": [], "cask": [], "apt": ["jq"]},
+                "options": {"wire_homebrew": True, "wire_shells": True, "exclude": []},
+            }
+            state_file.write_text(json.dumps(state, indent=2) + "\n")
+            with (
+                patch.object(u, "UNIENV_HOME", home),
+                patch.object(u, "STATE_FILE", state_file),
+                patch.object(u, "BACKUP_DIR", home / "backups"),
+                patch.object(u, "PY_DIR", home / "py"),
+                patch.object(u, "NODE_DIR", home / "node"),
+                patch.object(u, "LOG_FILE", home / "log" / "events.jsonl"),
+                patch.object(u, "platform_key", return_value="debian"),
+                patch.object(u, "do_sync", return_value={}),
+                patch("os.geteuid", return_value=0),
+                patch.object(u, "run", side_effect=AssertionError("should not run apt-get without -y")),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                rc = u.cmd_remove(argparse.Namespace(packages=["jq"], node=False, bin=True, cask=False, yes=False))
+            self.assertEqual(rc, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
