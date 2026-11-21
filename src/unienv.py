@@ -1765,10 +1765,17 @@ def _toml_text(data: dict) -> str:
             return item.isoformat()
         raise ValueError(f"unsupported TOML value: {type(item).__name__}")
 
-    if set(data.keys()) == {"sandbox_workspace_write"} and isinstance(data["sandbox_workspace_write"], dict):
-        body = "\n".join(f"{k} = {value(v)}" for k, v in data["sandbox_workspace_write"].items())
-        return f"[sandbox_workspace_write]\n{body}\n" if body else "[sandbox_workspace_write]\n"
-    return "\n".join(json.dumps(k, ensure_ascii=False) + " = " + value(v) for k, v in data.items()) + "\n"
+    def fmt_key(k: str) -> str:
+        return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k, ensure_ascii=False)
+
+    scalars = [f"{fmt_key(k)} = {value(v)}" for k, v in data.items() if not isinstance(v, dict)]
+    tables = []
+    for k, v in data.items():
+        if isinstance(v, dict):
+            body = "\n".join(f"{fmt_key(sk)} = {value(sv)}" for sk, sv in v.items())
+            tables.append(f"[{fmt_key(k)}]\n{body}" if body else f"[{fmt_key(k)}]")
+    parts = (["\n".join(scalars)] if scalars else []) + tables
+    return "\n\n".join(parts) + "\n" if parts else ""
 
 
 def _edit_codex_sandbox_toml(
