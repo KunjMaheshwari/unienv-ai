@@ -32,6 +32,8 @@ You can also install UniEnv as a **Claude Code plugin**, which bundles the `unie
 /plugin install unienv@unienv
 ```
 
+With UniEnv installed, you will see both a `unienv` and a `unienv:unienv` skill, and either one works.
+
 **Codex CLI** runs commands through a login shell by default, which reads `~/.profile` (or `~/.bash_profile`). In `workspace-write` sandbox mode, network access is off by default. `unienv need` from inside Codex may need approval to reach PyPI or Homebrew.
 
 **Gemini CLI** loads `~/.gemini/GEMINI.md` as global context.
