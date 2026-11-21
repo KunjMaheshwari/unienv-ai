@@ -45,7 +45,7 @@ unienv sandbox install --tool codex
 
 - Claude Code uses `sandbox.filesystem.allowRead` and `allowWrite` for the UniEnv directory plus a narrowly scoped Read permission. It does not change sandbox enablement or add Bash permissions. See the [sandbox settings documentation](https://code.claude.com/docs/en/sandboxing).
 - Codex uses `sandbox_workspace_write.writable_roots`. The existing sandbox mode and network setting are preserved. The additional root is effective in `workspace-write` mode; choose that mode yourself if appropriate. The installer never silently changes a read-only policy. See the [configuration reference](https://developers.openai.com/codex/config-reference).
-- Configuration is parsed before any write. Existing values and nested tables are retained, and timestamped backups are created. TOML is reserialized, so comments and formatting remain available in the backup rather than in the rewritten file.
+- Configuration is parsed before any write. Existing values and nested tables are retained, and timestamped backups are created. For Codex (`config.toml`), only the `[sandbox_workspace_write]` section is surgically edited in place (and verified with `tomllib.loads()`), preserving existing comments, table headers, and formatting across the rest of the file.
 - UniEnv records which entries it added in `~/.unienv/sandbox-settings.json`. `unienv uninstall` removes only those entries, retaining pre-existing grants and subsequent unrelated settings. Invalid or unreadable configurations are reported instead of overwritten.
 - Seatbelt/Gemini output is a snippet to merge into an existing policy, not a complete sandbox policy. It grants file access to UniEnv only; keep the agent's normal temporary-directory and executable rules.
 
