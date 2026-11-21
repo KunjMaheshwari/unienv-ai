@@ -1303,6 +1303,10 @@ def _safe_extract_tar(tar: tarfile.TarFile, dest: Path) -> None:
         target = (dest_path / name).resolve()
         if target != dest_path and dest_path not in target.parents:
             raise ValueError(f"tar member escapes destination: {name!r}")
+        if member.isdir():
+            member.mode = 0o755
+        else:
+            member.mode = (member.mode | 0o600) & 0o755
     with contextlib.ExitStack() as stack:
         if hasattr(tar, "extraction_filter"):
             orig_filter = tar.extraction_filter

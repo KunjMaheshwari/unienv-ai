@@ -4,8 +4,8 @@ All notable changes to UniEnv AI are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
-### Security
-- Reject all links and special members in the legacy tar extraction fallback, including chained symlink escapes. (#66)
+### Fixed
+- Remove stale generated shims on the first upgrade, preserve user files, and prune old backups once per sync or package addition. (#38)
 
 ### Security
 - Add MCP readonly and folder restrictions, disable arbitrary execution under roots, protect dangling output symlinks, sandbox Pandoc conversions, and expose policy settings in the Desktop extension. (#33)

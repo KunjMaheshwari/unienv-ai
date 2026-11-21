@@ -21,6 +21,8 @@ def _build_tar(entries: list[tuple[str, bytes | None, int, str]]) -> tarfile.Tar
         for name, data, ttype, linkname in entries:
             info = tarfile.TarInfo(name=name)
             info.type = ttype
+            if ttype == tarfile.DIRTYPE:
+                info.mode = 0o755
             if linkname:
                 info.linkname = linkname
             if data is not None:
@@ -52,6 +54,28 @@ class SafeTarExtractTests(unittest.TestCase):
             with patch.object(tarfile, "data_filter", None):
                 u._safe_extract_tar(tar, pathlib.Path(tmp))
             self.assertEqual((pathlib.Path(tmp) / "unienv-ai-main/unienv.py").read_bytes(), b"print('ok')")
+
+    def test_fallback_sanitizes_directory_and_file_modes(self):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            d = tarfile.TarInfo(name="unienv-ai-main")
+            d.type = tarfile.DIRTYPE
+            d.mode = 0o644  # missing execute bit in archive
+            tar.addfile(d)
+            f = tarfile.TarInfo(name="unienv-ai-main/script.sh")
+            f.type = tarfile.REGTYPE
+            f.mode = 0o4777  # setuid + world writable
+            data = b"#!/bin/sh\n"
+            f.size = len(data)
+            tar.addfile(f, io.BytesIO(data))
+        buf.seek(0)
+        with tarfile.open(fileobj=buf, mode="r:gz") as tar, tempfile.TemporaryDirectory() as tmp:
+            dest = pathlib.Path(tmp)
+            with patch.object(tarfile, "data_filter", None):
+                u._safe_extract_tar(tar, dest)
+            self.assertEqual((dest / "unienv-ai-main/script.sh").read_bytes(), b"#!/bin/sh\n")
+            self.assertEqual((dest / "unienv-ai-main").stat().st_mode & 0o7777, 0o755)
+            self.assertEqual((dest / "unienv-ai-main/script.sh").stat().st_mode & 0o7777, 0o755)
 
     def test_fallback_rejects_chained_symlink_escape_before_extracting(self):
         entries = [
