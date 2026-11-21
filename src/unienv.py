@@ -995,7 +995,7 @@ def _shell_files(state: dict | None = None) -> list[Path]:
     if state is None:
         state = load_state(load_recipes()) if STATE_FILE.exists() else {}
     for raw in state.get("wired_shell_files", []):
-        if isinstance(raw, str) and Path(raw).is_absolute() and Path(raw) not in files:
+        if isinstance(raw, str) and Path(raw).is_absolute() and Path(raw) not in files and Path(raw).exists():
             files.append(Path(raw))
     return files
 
