@@ -77,6 +77,7 @@ class ZdotdirTests(unittest.TestCase):
                 patch.object(u, "LAUNCH_AGENT", home / "none.plist"),
                 patch.object(u, "install_node", return_value=None),
                 patch.object(u, "write_shims", return_value=None),
+                patch.object(u, "sync_agents", return_value=[]),
                 patch.object(u, "write_manifest", return_value={}),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
