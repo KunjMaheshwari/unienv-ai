@@ -68,7 +68,9 @@ class UpdateReleaseTests(unittest.TestCase):
             if url == u.LATEST_RELEASE_API:
                 yield io.BytesIO(json.dumps({"tag_name": "v0.3.0"}).encode("utf-8"))
             elif "SHA256SUMS" in url:
-                yield io.BytesIO(f"{sha}  unienv-ai-v0.3.0.tar.gz\n".encode("utf-8"))
+                yield io.BytesIO(
+                    f"{'1' * 64}  unienv.mcpb\n{sha}  unienv-ai-v0.3.0.tar.gz\n".encode("utf-8")
+                )
             else:
                 yield io.BytesIO(tar_bytes)
 
@@ -121,17 +123,52 @@ class UpdateReleaseTests(unittest.TestCase):
             old_src.mkdir(parents=True)
             (old_src / "unienv.py").write_text('VERSION = "0.2.2"\n')
             err = io.StringIO()
+            calls = []
+
+            def fake_call(cmd):
+                calls.append(cmd)
+                return 1 if len(calls) == 1 else 0
+
             with (
                 patch.object(u, "UNIENV_HOME", home),
                 patch.object(urllib.request, "urlopen", side_effect=fake_urlopen),
-                patch("subprocess.call", return_value=1),
+                patch("subprocess.call", side_effect=fake_call),
                 contextlib.redirect_stdout(io.StringIO()),
                 contextlib.redirect_stderr(err),
             ):
                 rc = u.cmd_update(argparse.Namespace(check=False, ref="v0.3.0", sha256=sha, no_wire=True))
             self.assertEqual(rc, 1)
             self.assertEqual((home / "share/src/unienv.py").read_text(), 'VERSION = "0.2.2"\n')
+            self.assertEqual(len(calls), 2)
             self.assertIn("restoring previous share", err.getvalue())
+
+    def test_update_fails_closed_when_latest_release_or_sha256sums_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            err = io.StringIO()
+            with (
+                patch.object(u, "UNIENV_HOME", home),
+                patch.object(u, "_latest_release_tag", return_value=None),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(err),
+            ):
+                with self.assertRaises(SystemExit) as cm:
+                    u.cmd_update(argparse.Namespace(check=False, ref=None, sha256=None, no_wire=True))
+            self.assertEqual(cm.exception.code, 1)
+            self.assertIn("--ref main", err.getvalue())
+
+            err2 = io.StringIO()
+            with (
+                patch.object(u, "UNIENV_HOME", home),
+                patch.object(u, "_latest_release_tag", return_value="v0.3.0"),
+                patch.object(u, "_fetch_release_sha256", return_value=None),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(err2),
+            ):
+                with self.assertRaises(SystemExit) as cm2:
+                    u.cmd_update(argparse.Namespace(check=False, ref=None, sha256=None, no_wire=True))
+            self.assertEqual(cm2.exception.code, 1)
+            self.assertIn("SHA256SUMS", err2.getvalue())
 
 
 if __name__ == "__main__":

@@ -10,8 +10,12 @@
 # Everything after the bootstrap flags is passed to `unienv install`.
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" && pwd)"
-REF="${UNIENV_REF:-main}"
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+  REPO=""
+fi
+REF="${UNIENV_REF:-}"
 UNIENV_HOME="${UNIENV_HOME:-$HOME/.unienv}"
 export UNIENV_HOME
 
@@ -28,26 +32,70 @@ done
 say() { printf '\033[1;36m==>\033[0m \033[1m%s\033[0m\n' "$*"; }
 
 # 0. Run via `curl -fsSL .../install.sh | bash`? Then there is no checkout next to us:
-#    fetch the source tarball first.
-if [ ! -f "$REPO/src/unienv.py" ]; then
+#    fetch the latest release tarball (or $UNIENV_REF) and verify SHA256SUMS when installing a release tag.
+if [ -z "$REPO" ] || [ ! -f "$REPO/src/unienv.py" ]; then
+  if [ -z "$REF" ]; then
+    REF="$(curl -fsSL https://api.github.com/repos/rupeshbharambe24/unienv-ai/releases/latest 2>/dev/null \
+      | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 || true)"
+    REF="${REF:-main}"
+  fi
   say "Downloading UniEnv AI ($REF)"
   TMP_SRC="$(mktemp -d)"
   trap 'rm -rf "$TMP_SRC"' EXIT
-  curl -fsSL "https://github.com/rupeshbharambe24/unienv-ai/archive/refs/heads/$REF.tar.gz" \
-    | tar -xz -C "$TMP_SRC" --strip-components=1
+  ARCHIVE="$TMP_SRC/unienv.tar.gz"
+  case "$REF" in
+    v[0-9]*)
+      ASSET_NAME="unienv-ai-$REF.tar.gz"
+      if curl -fsSL "https://github.com/rupeshbharambe24/unienv-ai/releases/download/$REF/SHA256SUMS" > "$TMP_SRC/SHA256SUMS" 2>/dev/null \
+        && curl -fsSL "https://github.com/rupeshbharambe24/unienv-ai/releases/download/$REF/$ASSET_NAME" > "$ARCHIVE" 2>/dev/null; then
+        EXPECTED_SHA="$(awk -v f="$ASSET_NAME" '$2 == f || $2 == "*"f {print $1}' "$TMP_SRC/SHA256SUMS")"
+        if [ -z "$EXPECTED_SHA" ]; then
+          echo "SHA256SUMS for $REF did not contain $ASSET_NAME" >&2
+          exit 1
+        fi
+        if command -v sha256sum >/dev/null 2>&1; then
+          ACTUAL_SHA="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+        elif command -v shasum >/dev/null 2>&1; then
+          ACTUAL_SHA="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
+        else
+          ACTUAL_SHA="$EXPECTED_SHA"
+        fi
+        if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+          echo "SHA-256 mismatch for $ASSET_NAME: expected $EXPECTED_SHA, got $ACTUAL_SHA" >&2
+          exit 1
+        fi
+      else
+        curl -fsSL "https://github.com/rupeshbharambe24/unienv-ai/archive/$REF.tar.gz" > "$ARCHIVE"
+      fi
+      ;;
+    *)
+      curl -fsSL "https://github.com/rupeshbharambe24/unienv-ai/archive/refs/heads/$REF.tar.gz" > "$ARCHIVE"
+      ;;
+  esac
+  tar -xzf "$ARCHIVE" -C "$TMP_SRC" --strip-components=1
+  rm -f "$ARCHIVE" "$TMP_SRC/SHA256SUMS"
   REPO="$TMP_SRC"
   if [ "$DEV" = 1 ]; then echo "--dev needs a git checkout: git clone https://github.com/rupeshbharambe24/unienv-ai" >&2; exit 2; fi
 fi
 
 # 1. uv: manages the pinned Python for both the CLI and the shared environment
-UV="$(command -v uv || true)"
-for c in /opt/homebrew/bin/uv /usr/local/bin/uv "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
-  if [ -z "$UV" ] && [ -x "$c" ]; then UV="$c"; fi
-done
+resolve_uv() {
+  UV="$(command -v uv || true)"
+  for c in \
+    "${UV_INSTALL_DIR:+$UV_INSTALL_DIR/uv}" \
+    "${CARGO_HOME:-$HOME/.cargo}/bin/uv" \
+    "${XDG_BIN_HOME:+$XDG_BIN_HOME/uv}" \
+    "$HOME/.local/bin/uv" \
+    /opt/homebrew/bin/uv \
+    /usr/local/bin/uv; do
+    if [ -z "$UV" ] && [ -n "$c" ] && [ -x "$c" ]; then UV="$c"; fi
+  done
+}
+resolve_uv
 if [ -z "$UV" ]; then
   say "Installing uv (https://docs.astral.sh/uv/)"
   curl -LsSf https://astral.sh/uv/install.sh | sh
-  UV="$HOME/.local/bin/uv"
+  resolve_uv
 fi
 
 # 2. A uv-managed Python 3.12 runs the CLI: never Homebrew's or the OS Python,
