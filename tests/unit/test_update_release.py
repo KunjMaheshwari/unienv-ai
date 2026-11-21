@@ -68,9 +68,7 @@ class UpdateReleaseTests(unittest.TestCase):
             if url == u.LATEST_RELEASE_API:
                 yield io.BytesIO(json.dumps({"tag_name": "v0.3.0"}).encode("utf-8"))
             elif "SHA256SUMS" in url:
-                yield io.BytesIO(
-                    f"{'1' * 64}  unienv.mcpb\n{sha}  unienv-ai-v0.3.0.tar.gz\n".encode("utf-8")
-                )
+                yield io.BytesIO(f"{'1' * 64}  unienv.mcpb\n{sha}  unienv-ai-v0.3.0.tar.gz\n".encode("utf-8"))
             else:
                 yield io.BytesIO(tar_bytes)
 
