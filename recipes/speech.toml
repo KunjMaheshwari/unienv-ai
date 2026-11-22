@@ -16,6 +16,12 @@ brew = ["ffmpeg"]
 [system.debian]
 apt = ["ffmpeg"]
 
+[system.fedora]
+dnf = ["ffmpeg-free"]
+
+[system.arch]
+pacman = ["ffmpeg"]
+
 [verify]
 bins = ["ffmpeg"]
 

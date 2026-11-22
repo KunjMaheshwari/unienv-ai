@@ -207,6 +207,89 @@ class ExportImportTests(unittest.TestCase):
                     u.cmd_import(argparse.Namespace(file="-", no_system=True, no_wire=True, yes=True))
             self.assertIn("invalid environment file", err.getvalue())
 
+    def test_import_stdin_prompts_via_tty_tuple(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            env_toml = 'schema = "unienv/env/v0"\nbatteries = ["pdf"]\n[options]\nexclude = []\n[extras]\npython = []\nnode = []\nbrew = []\ncask = []\napt = []\n'
+            tin = io.StringIO("y\n")
+            tout = io.StringIO()
+            with (
+                patch.object(u, "HOME", root),
+                patch.object(u, "UNIENV_HOME", root / ".unienv"),
+                patch.object(u, "STATE_FILE", root / ".unienv/state.json"),
+                patch.object(u, "PY_DIR", root / ".unienv/py"),
+                patch.object(u, "NODE_DIR", root / ".unienv/node"),
+                patch.object(u, "LOG_FILE", root / ".unienv/log/events.jsonl"),
+                patch.object(u, "_tty", return_value=(tin, tout)),
+                patch.object(u, "cmd_install", return_value=0) as mock_install,
+                patch.object(u, "cmd_doctor", return_value=0),
+                patch("sys.stdin", io.StringIO(env_toml)),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                rc = u.cmd_import(argparse.Namespace(file="-", no_system=True, no_wire=True, yes=False))
+            self.assertEqual(rc, 0)
+            self.assertTrue(tin.closed)
+            self.assertTrue(tout.closed)
+            mock_install.assert_called_once()
+
+    def test_doctor_failure_does_not_roll_back_successful_import(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            env_file = root / "env.toml"
+            env_file.write_text(
+                'schema = "unienv/env/v0"\nbatteries = ["ocr"]\n[options]\nexclude = []\n[extras]\npython = []\nnode = []\nbrew = []\ncask = []\napt = []\n'
+            )
+            state_file = root / ".unienv/state.json"
+            state_file.parent.mkdir(parents=True)
+            state_file.write_text(json.dumps(u.default_state(u.load_recipes())) + "\n")
+            err = io.StringIO()
+            with (
+                patch.object(u, "HOME", root),
+                patch.object(u, "UNIENV_HOME", root / ".unienv"),
+                patch.object(u, "STATE_FILE", state_file),
+                patch.object(u, "PY_DIR", root / ".unienv/py"),
+                patch.object(u, "NODE_DIR", root / ".unienv/node"),
+                patch.object(u, "LOG_FILE", root / ".unienv/log/events.jsonl"),
+                patch.object(u, "install_system", return_value=["apt:tesseract-ocr"]),
+                patch.object(u, "install_python", return_value=None),
+                patch.object(u, "install_node", return_value=None),
+                patch.object(u, "do_sync", return_value={}),
+                patch.object(u, "cmd_doctor", return_value=1),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(err),
+            ):
+                rc = u.cmd_import(argparse.Namespace(file=str(env_file), no_system=True, no_wire=True, yes=True))
+            self.assertEqual(rc, 0)
+            saved = json.loads(state_file.read_text())
+            self.assertEqual(saved["batteries"], ["ocr"])
+            self.assertIn("unienv doctor", err.getvalue())
+
+    def test_rollback_repair_runs_do_sync_even_when_install_node_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            env_file = root / "env.toml"
+            env_file.write_text(
+                'schema = "unienv/env/v0"\nbatteries = ["pdf"]\n[options]\nexclude = []\n[extras]\npython = []\nnode = []\nbrew = []\ncask = []\napt = []\n'
+            )
+            (root / ".unienv/node").mkdir(parents=True)
+            (root / ".unienv/node/package.json").write_text('{"dependencies": {"docx": "latest"}}\n')
+            with (
+                patch.object(u, "HOME", root),
+                patch.object(u, "UNIENV_HOME", root / ".unienv"),
+                patch.object(u, "STATE_FILE", root / ".unienv/state.json"),
+                patch.object(u, "PY_DIR", root / ".unienv/py"),
+                patch.object(u, "NODE_DIR", root / ".unienv/node"),
+                patch.object(u, "LOG_FILE", root / ".unienv/log/events.jsonl"),
+                patch.object(u, "cmd_install", side_effect=RuntimeError("uv sync boom")),
+                patch.object(u, "install_node", side_effect=RuntimeError("npm missing")),
+                patch.object(u, "do_sync", return_value={}) as mock_sync,
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                rc = u.cmd_import(argparse.Namespace(file=str(env_file), no_system=True, no_wire=True, yes=True))
+            self.assertEqual(rc, 1)
+            mock_sync.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
