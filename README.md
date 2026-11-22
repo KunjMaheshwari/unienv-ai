@@ -290,6 +290,15 @@ UniEnv is free and open source. If it saves you time, please **[give it a star o
 
 Thank you to everyone who has helped build UniEnv AI: [@bfs2021](https://github.com/bfs2021), [@SantanDon](https://github.com/SantanDon), [@CyberKun](https://github.com/CyberKun), [@sanjanamg0](https://github.com/sanjanamg0) and [@KunjMaheshwari](https://github.com/KunjMaheshwari). Want to see your name here? Pick an [issue](https://github.com/rupeshbharambe24/unienv-ai/labels/good%20first%20issue).
 
+
+### Homebrew Tap (Maintainer Setup)
+
+To enable automated Homebrew formula updates from `.github/workflows/release.yml`:
+
+1. Create the tap repository `rupeshbharambe24/homebrew-unienv`.
+2. Create a fine-grained GitHub personal access token scoped **only** to `rupeshbharambe24/homebrew-unienv` with **Contents: Read and write** permission.
+3. Save the token as the `HOMEBREW_TAP_TOKEN` repository secret in `rupeshbharambe24/unienv-ai`. When unset, the tap-update step is skipped automatically.
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Tools installed by recipes keep their own licenses (see each recipe's `license_note`).
