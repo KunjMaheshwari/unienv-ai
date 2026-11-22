@@ -224,6 +224,11 @@ def tool_env() -> dict[str, str]:
     env.update(
         {"PATH": os.pathsep.join(path), "UNIENV_HOME": str(UNIENV_HOME), "PYTHONUNBUFFERED": "1", "MPLBACKEND": "Agg"}
     )
+    browsers_dir = UNIENV_HOME / "browsers"
+    if "PLAYWRIGHT_BROWSERS_PATH" in os.environ:
+        env["PLAYWRIGHT_BROWSERS_PATH"] = os.environ["PLAYWRIGHT_BROWSERS_PATH"]
+    elif browsers_dir.is_dir():
+        env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir)
     tmp = os.environ.get("TMPDIR", "/tmp")
     if sys.platform == "darwin" and (tmp == "/tmp" or tmp.startswith("/tmp/")):
         tmp = "/private" + tmp  # Leptonica rewrites /tmp paths (see env.sh)

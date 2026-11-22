@@ -13,6 +13,12 @@ imports = ["playwright"]
 [system.debian]
 apt = []
 
+[system.fedora]
+dnf = []
+
+[system.arch]
+pacman = []
+
 [verify]
 bins = []
 
@@ -23,5 +29,5 @@ notes = """
   `p.chromium.launch(headless=True)`
 - In Docker or container environments where user-namespace sandboxing is unavailable, pass `args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]` as a fallback.
 - If macOS Seatbelt sandboxes fail with `bootstrap_check_in` Mach port errors, run browser commands outside the sandbox or grant Mach port lookup in the sandbox profile.
-- Ensure Chromium is downloaded into the shared folder: `PLAYWRIGHT_BROWSERS_PATH="$UNIENV_HOME/browsers" ue-py -m playwright install chromium` (on Linux, run `sudo ~/.unienv/bin/ue-py -m playwright install-deps chromium` if any shared library is missing).
+- Ensure Chromium is downloaded into the shared folder: `PLAYWRIGHT_BROWSERS_PATH="$UNIENV_HOME/browsers" ue-py -m playwright install chromium` (on Linux, run `sudo $UNIENV_HOME/bin/ue-py -m playwright install-deps chromium` if any shared library is missing).
 """
