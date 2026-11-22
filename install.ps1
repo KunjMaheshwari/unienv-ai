@@ -111,6 +111,21 @@ try {
             $NewUserPath = if ($UserPath) { "$BinDir;$UserPath" } else { $BinDir }
             @{ entry = $BinDir } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $UniEnvHome "windows-path.json")
             $EnvKey.SetValue("Path", $NewUserPath, $PathKind)
+            try {
+                if (-not ("UniEnv.NativeMethods" -as [type])) {
+                    Add-Type -Namespace UniEnv -Name NativeMethods -MemberDefinition @"
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern IntPtr SendMessageTimeout(
+    IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+    uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+"@
+                }
+                $result = [UIntPtr]::Zero
+                [void][UniEnv.NativeMethods]::SendMessageTimeout(
+                    [IntPtr]0xFFFF, 0x001A, [UIntPtr]::Zero, "Environment", 0x0002, 5000, [ref]$result)
+            } catch {
+                # Non-fatal: new shells will still pick up the updated PATH on next login
+            }
         }
     } finally {
         $EnvKey.Close()

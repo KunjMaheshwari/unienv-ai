@@ -28,7 +28,7 @@ import time
 import tomllib
 from pathlib import Path
 
-VERSION = "0.2.2"
+VERSION = "0.3.0"
 PY_VERSION = "3.12"
 
 HOME = Path.home()
@@ -207,22 +207,30 @@ def uniq(items) -> list:
     return out
 
 
-def _os_release_tokens(path: Path = Path("/etc/os-release")) -> set[str]:
+def _os_release_info(path: Path = Path("/etc/os-release")) -> tuple[str, set[str]]:
     if not path.exists():
-        return set()
+        return "", set()
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
-        return set()
+        return "", set()
+    distro_id = ""
     tokens: set[str] = set()
     for line in text.splitlines():
         if "=" not in line or line.lstrip().startswith("#"):
             continue
         k, _, v = line.strip().partition("=")
-        if k in ("ID", "ID_LIKE"):
-            for tok in v.strip("\"'").lower().split():
-                tokens.add(tok)
-    return tokens
+        vals = v.strip("\"'").lower().split()
+        if k == "ID" and vals:
+            distro_id = vals[0]
+            tokens.add(distro_id)
+        elif k == "ID_LIKE":
+            tokens.update(vals)
+    return distro_id, tokens
+
+
+def _os_release_tokens(path: Path = Path("/etc/os-release")) -> set[str]:
+    return _os_release_info(path)[1]
 
 
 def platform_key() -> str:
@@ -232,17 +240,13 @@ def platform_key() -> str:
         return "windows"
     if Path("/etc/debian_version").exists():
         return "debian"
-    tokens = _os_release_tokens()
+    distro_id, tokens = _os_release_info()
     if tokens & {"debian", "ubuntu"}:
         return "debian"
-    if tokens & {"rhel", "centos", "rocky", "almalinux"}:
-        return sys.platform
-    if "fedora" in tokens or Path("/etc/fedora-release").exists():
+    if distro_id == "fedora" or Path("/etc/fedora-release").exists():
         return "fedora"
     if tokens & {"arch", "manjaro", "endeavouros"} or Path("/etc/arch-release").exists():
         return "arch"
-    if which("dnf"):
-        return "fedora"
     if which("pacman"):
         return "arch"
     return sys.platform
@@ -560,7 +564,7 @@ def _winget_installed(winget: str, pkg: str) -> bool:
 
 
 def _dnf_installed(pkg: str) -> bool:
-    return run(["rpm", "-q", pkg], capture=True, check=False).returncode == 0
+    return run(["rpm", "-q", "--whatprovides", pkg], capture=True, check=False).returncode == 0
 
 
 def _pacman_installed(pkg: str) -> bool:
@@ -860,7 +864,7 @@ def write_shims() -> None:
             f'>> "%TEMP%\\unienv-uninstall.cmd" echo "{sys.executable}" "%%TEMP%%\\unienv-uninstall.py" %%*\r\n'
             '>> "%TEMP%\\unienv-uninstall.cmd" echo set "RC=%%ERRORLEVEL%%"\r\n'
             '>> "%TEMP%\\unienv-uninstall.cmd" echo del /f /q "%%TEMP%%\\unienv-uninstall.py" 2^>nul\r\n'
-            '>> "%TEMP%\\unienv-uninstall.cmd" echo (goto) 2^>nul ^& del /f /q "%%~f0" ^& exit /b %%RC%%\r\n'
+            '>> "%TEMP%\\unienv-uninstall.cmd" echo (goto) 2^>nul ^& del /f /q "%%~f0" ^& cmd /c exit %%RC%%\r\n'
             '"%TEMP%\\unienv-uninstall.cmd" %*\r\n'
         )
         (BIN / "unienv.cmd").write_text(cli_cmd, newline="")
@@ -1264,6 +1268,148 @@ def cmd_sync(args) -> int:
     return 0
 
 
+def _ver_tuple(v: str) -> tuple[int, ...] | None:
+    # Complex versions require a full PEP 440 / npm parser. Never guess.
+    if not re.fullmatch(r"\d+(?:\.\d+)*", v):
+        return None
+    parts = [int(n) for n in v.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def _version_matches(installed: str, op: str, target: str) -> bool | None:
+    iv = _ver_tuple(installed)
+    wildcard = target.endswith(".*")
+    tv = _ver_tuple(target[:-2] if wildcard else target)
+    if iv is None or tv is None:
+        return None
+    if wildcard:
+        if op not in ("==", "!="):
+            return None
+        prefix = tuple(int(n) for n in target[:-2].split("."))
+        values = iv + (0,) * max(0, len(prefix) - len(iv))
+        result = values[: len(prefix)] == prefix
+        return result if op == "==" else not result
+    if op in ("==", "=", "==="):
+        return iv == tv
+    if op == "!=":
+        return iv != tv
+    if op == ">=":
+        return iv >= tv
+    if op == "<=":
+        return iv <= tv
+    if op == ">":
+        return iv > tv
+    if op == "<":
+        return iv < tv
+    raw = [int(n) for n in target.split(".")]
+    if op == "~=":
+        if len(raw) < 2:
+            return None
+        upper = tuple(raw[:-2] + [raw[-2] + 1])
+        return tv <= iv < upper
+    if op == "~":
+        upper = (raw[0] + 1,) if len(raw) == 1 else (raw[0], raw[1] + 1)
+        return tv <= iv < upper
+    if op == "^":
+        if len(raw) < 3:
+            return None
+        while len(raw) < 3:
+            raw.append(0)
+        index = next((i for i, n in enumerate(raw) if n), len(raw) - 1)
+        upper = tuple(raw[:index] + [raw[index] + 1])
+        return tv <= iv < upper
+    return None
+
+
+def _installed_versions(kind: str, pkgs: list[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if MANIFEST_FILE.exists():
+        with contextlib.suppress(OSError, json.JSONDecodeError, KeyError, TypeError):
+            m = json.loads(MANIFEST_FILE.read_text())
+            raw = m.get(kind, {}).get("packages", {}) or {}
+            out.update({(norm(k) if kind == "python" else k): v for k, v in raw.items() if v})
+    if kind == "python":
+        for k, v in python_packages().items():
+            if v:
+                out[k] = v
+    elif kind == "node":
+        for k, v in node_packages(pkgs).items():
+            if v:
+                out[k] = v
+    return out
+
+
+def _spec_satisfied(
+    kind: str,
+    spec: str,
+    manifest_pkgs: dict[str, str],
+    configured_specs: list[str] | None = None,
+) -> tuple[bool | None, str | None]:
+    if kind == "python":
+        name = py_name(spec)
+        installed = manifest_pkgs.get(name)
+        m = re.match(r"^[A-Za-z0-9_.-]+(?:\[([^\]]+)\])?\s*(.*)$", spec.strip().split(";", 1)[0])
+        extras_str, ver_part = (m.group(1), m.group(2).strip()) if m else (None, "")
+        if not extras_str and not ver_part:
+            return True, installed
+        if extras_str:
+            req_extras = {e.strip().lower() for e in extras_str.split(",") if e.strip()}
+            have_extras: set[str] = set()
+            for cs in configured_specs or []:
+                if py_name(cs) == name:
+                    em = re.search(r"\[([^\]]+)\]", cs)
+                    if em:
+                        have_extras.update(e.strip().lower() for e in em.group(1).split(",") if e.strip())
+            if not req_extras.issubset(have_extras):
+                return None, installed
+        if ver_part:
+            if not installed:
+                return None, None
+            matches = []
+            for clause in (c.strip() for c in ver_part.split(",") if c.strip()):
+                cm = re.fullmatch(r"(===|==|!=|~=|>=|<=|>|<)\s*(.+)", clause)
+                matches.append(_version_matches(installed, cm.group(1), cm.group(2).strip()) if cm else None)
+            if None in matches:
+                return None, installed
+            return all(matches), installed
+        return True, installed
+    if kind == "node":
+        name = node_name(spec)
+        installed = manifest_pkgs.get(name)
+        ver = node_version(spec)
+        if ver in ("latest", "*"):
+            return True, installed
+        if not installed:
+            return None, None
+        if re.fullmatch(r"\d+(?:\.\d+){0,1}", ver):
+            prefix = tuple(int(n) for n in ver.split("."))
+            iv = _ver_tuple(installed)
+            if iv is None:
+                return None, installed
+            padded = iv + (0,) * max(0, len(prefix) - len(iv))
+            return padded[: len(prefix)] == prefix, installed
+        clauses = [c.strip() for c in ver.split() if c.strip()]
+        matches = []
+        for clause in clauses:
+            cm = re.fullmatch(r"(\^|~|>=|<=|>|<|=)?\s*(\d+(?:\.\d+)*)", clause)
+            if not cm:
+                matches.append(None)
+                continue
+            op = cm.group(1) or "=="
+            ver_str = cm.group(2)
+            n_parts = len(ver_str.split("."))
+            if n_parts != 3 and not (op == "~" and n_parts == 2 and len(clauses) == 1):
+                matches.append(None)
+            else:
+                matches.append(_version_matches(installed, op, ver_str))
+        if None in matches:
+            return None, installed
+        return all(matches), installed
+    return True, manifest_pkgs.get(spec)
+
+
 def cmd_need(args) -> int:
     recipes_all = load_recipes()
     state = load_state(recipes_all)
@@ -1279,6 +1425,27 @@ def cmd_need(args) -> int:
 
     key = {"python": py_name, "node": node_name}.get(kind, lambda s: s)
     present = {key(p) for p in w[kind]}
+    already = [p for p in pkgs if key(p) in present]
+    constrained = [
+        p
+        for p in already
+        if (kind == "python" and ("[" in p or re.search(r"[<>=!~]", p)))
+        or (kind == "node" and node_version(p) not in ("latest", "*"))
+    ]
+    if constrained and kind in ("python", "node"):
+        manifest_pkgs = _installed_versions(kind, w[kind] + already)
+        unsatisfied = False
+        for p in constrained:
+            ok, inst_ver = _spec_satisfied(kind, p, manifest_pkgs, w[kind])
+            if ok is False:
+                ver_label = f" {inst_ver}" if inst_ver else ""
+                warn(
+                    f"{key(p)}{ver_label} is installed; `{p}` isn't satisfied. "
+                    "Change the pin with `unienv upgrade` (#27)"
+                )
+                unsatisfied = True
+        if unsatisfied:
+            return 1
     new = [p for p in pkgs if key(p) not in present]
     if not new:
         info(f"✓ already available: {', '.join(pkgs)}")
@@ -1368,6 +1535,129 @@ def cmd_need(args) -> int:
     log_event(event="need", kind=kind, packages=new, curated=not uncurated)
     via = {"python": "ue-py", "node": "ue-node"}.get(kind, "PATH")
     info(f"✓ installed {', '.join(new)}; available to every AI tool via {via}")
+    return 0
+
+
+def cmd_remove(args) -> int:
+    recipes_all = load_recipes()
+    state = load_state(recipes_all)
+    kind = "node" if args.node else "brew" if args.bin else "cask" if args.cask else "python"
+    if kind in ("brew", "cask") and platform_key() == "debian":
+        kind = "apt"
+    pkgs = args.packages
+    recipes = active_recipes(recipes_all, state)
+    pk = platform_key()
+    key = {"python": py_name, "node": node_name}.get(kind, lambda s: s)
+
+    extras_keys = {key(p) for p in state["extras"][kind]}
+    battery_owner: dict[str, str] = {}
+    for r in recipes:
+        r_pkgs = (
+            r.get(kind, {}).get("packages", [])
+            if kind in ("python", "node")
+            else r.get("system", {}).get(pk, {}).get(kind, [])
+        )
+        for p in r_pkgs:
+            battery_owner.setdefault(key(p), r["id"])
+
+    for p in pkgs:
+        k = key(p)
+        if k not in extras_keys:
+            if k in battery_owner:
+                bat = battery_owner[k]
+                if kind in ("brew", "cask", "apt"):
+                    warn(
+                        f"{p} is provided by the '{bat}' battery (not added with `unienv need`); "
+                        f"use `unienv install --exclude {p}` to skip it"
+                    )
+                else:
+                    warn(
+                        f"{p} is provided by the '{bat}' battery (not added with `unienv need`); "
+                        f"disable the battery with `unienv install --batteries ...` or `unienv install --exclude {p}`"
+                    )
+            else:
+                warn(f"{p} is not installed in extras ({kind})")
+            return 1
+
+    tracked = [
+        STATE_FILE,
+        PY_DIR / "pyproject.toml",
+        PY_DIR / "uv.lock",
+        NODE_DIR / "package.json",
+        NODE_DIR / "package-lock.json",
+    ]
+    existed = {f: f.exists() for f in tracked}
+    snap = BACKUP_DIR / _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    snap.mkdir(parents=True, exist_ok=True)
+    for f in tracked:
+        if existed[f]:
+            shutil.copy2(f, snap / f"{f.parent.name}__{f.name}")
+
+    remove_keys = {key(p) for p in pkgs}
+    removed = [p for p in state["extras"][kind] if key(p) in remove_keys]
+    state["extras"][kind] = [p for p in state["extras"][kind] if key(p) not in remove_keys]
+    w = wanted(recipes, state)
+    still_wanted = {key(x) for x in w[kind]}
+    to_uninstall = [p for p in removed if key(p) not in still_wanted]
+    try:
+        if kind == "python":
+            install_python(w["python"])
+        elif kind == "node":
+            if w["node"]:
+                install_node(w["node"], require_npm=True)
+            elif (NODE_DIR / "package.json").exists():
+                write_package_json([])
+                shutil.rmtree(NODE_DIR / "node_modules", ignore_errors=True)
+                (NODE_DIR / "package-lock.json").unlink(missing_ok=True)
+        elif kind in ("brew", "cask") and to_uninstall:
+            brew = which("brew")
+            cmd = [brew or "brew", "uninstall", *(["--cask"] if kind == "cask" else []), *to_uninstall]
+            if args.yes and brew:
+                run(cmd)
+            else:
+                info(f"  removed from UniEnv extras; to also uninstall from Homebrew, run: {' '.join(cmd)}")
+        elif kind == "apt" and to_uninstall:
+            cmd = ["sudo", "apt-get", "remove", "-y", *to_uninstall]
+            if args.yes:
+                sim = run(["apt-get", "-s", "remove", *to_uninstall], capture=True, check=False)
+                extra_removed = [
+                    m.group(1)
+                    for m in re.finditer(r"(?m)^Remv\s+(\S+)", sim.stdout or "")
+                    if m.group(1) not in to_uninstall
+                ]
+                if extra_removed:
+                    warn(
+                        "aborting apt-get remove because it would also remove dependent packages: "
+                        + ", ".join(extra_removed)
+                    )
+                    raise RuntimeError("apt-get remove would remove extra packages")
+                run(cmd[1:] if os.geteuid() == 0 else cmd)
+            else:
+                info(f"  removed from UniEnv extras; to also uninstall from apt, run: {' '.join(cmd)}")
+    except BaseException as e:
+        warn(f"remove failed ({e}); rolling back")
+        for f in tracked:
+            if existed[f]:
+                shutil.copy2(snap / f"{f.parent.name}__{f.name}", f)
+            elif f.exists():
+                f.unlink()
+        state = load_state(recipes_all)
+        try:
+            if kind == "python" and existed[PY_DIR / "pyproject.toml"]:
+                install_python(wanted(recipes, state)["python"])
+            elif kind == "node" and existed[NODE_DIR / "package.json"]:
+                install_node(wanted(recipes, state)["node"])
+        except (subprocess.CalledProcessError, RuntimeError, SystemExit) as re_err:
+            warn(f"rollback re-install failed ({re_err}); run unienv install to repair")
+        log_event(event="remove-failed", kind=kind, packages=removed)
+        if not isinstance(e, (subprocess.CalledProcessError, RuntimeError, SystemExit)):
+            raise
+        return 1
+
+    save_state(state)
+    do_sync(state, recipes_all, quiet=True)
+    log_event(event="remove", kind=kind, packages=removed)
+    info(f"✓ removed {', '.join(removed)}")
     return 0
 
 
@@ -1576,6 +1866,9 @@ def cmd_status(args) -> int:
 
 
 REPO_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/archive/{ref}.tar.gz"
+LATEST_RELEASE_API = "https://api.github.com/repos/rupeshbharambe24/unienv-ai/releases/latest"
+RELEASE_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/releases/download/{ref}/unienv-ai-{ref}.tar.gz"
+RELEASE_SHA256SUMS = "https://github.com/rupeshbharambe24/unienv-ai/releases/download/{ref}/SHA256SUMS"
 
 
 # ── MCP server for desktop apps ─────────────────────────────────────────────
@@ -1779,6 +2072,58 @@ def mcp_handshake(timeout: float = 15) -> tuple[bool, str, float]:
         return False, f"{type(e).__name__}: {e}", time.monotonic() - start
 
 
+def _version_tuple(ver: str) -> tuple[int, ...]:
+    cleaned = ver.lstrip("v").split("-", 1)[0]
+    return tuple(int(p) if p.isdigit() else 0 for p in cleaned.split("."))
+
+
+def _latest_release_tag() -> str | None:
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(LATEST_RELEASE_API, headers={"Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        tag = data.get("tag_name")
+        return str(tag) if tag else None
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def _is_release_tag(ref: str) -> bool:
+    return bool(re.fullmatch(r"v\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.]+)?", ref))
+
+
+def _fetch_release_sha256(ref: str) -> str:
+    import urllib.error
+    import urllib.request
+
+    url = RELEASE_SHA256SUMS.format(ref=ref)
+    target_name = f"unienv-ai-{ref}.tar.gz"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            text = resp.read().decode("utf-8")
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, UnicodeDecodeError) as e:
+        die(
+            f"could not download UniEnv ref {ref!r} ({e}); "
+            "check the branch or tag name, or pass `--sha256 <digest>` / `--ref main` to override"
+        )
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        digest = parts[0].lower()
+        name = parts[-1].lstrip("*")
+        if re.fullmatch(r"[0-9a-f]{64}", digest) and name == target_name:
+            return digest
+    die(
+        f"could not verify SHA256SUMS for release {ref!r} ({target_name} entry missing); "
+        "pass `--sha256 <digest>` or `--ref main` to override"
+    )
+    return ""
+
+
 def _safe_extract_tar(tar: tarfile.TarFile, dest: Path) -> None:
     """Extract a tarball safely on both Python 3.11.4+ (filter='data') and 3.11.0-3.11.3."""
     dest_path = Path(dest).resolve()
@@ -1809,15 +2154,46 @@ def _safe_extract_tar(tar: tarfile.TarFile, dest: Path) -> None:
 
 def cmd_update(args) -> int:
     """Download the latest UniEnv, replace ~/.unienv/share, then re-run install with the new code."""
+    import hashlib
     import tempfile
     import urllib.error
     import urllib.request
 
+    if getattr(args, "check", False):
+        latest = _latest_release_tag()
+        if not latest:
+            die("could not query the latest UniEnv release tag")
+        if _version_tuple(latest) > _version_tuple(VERSION):
+            info(f"A newer version is available: {latest} (installed: v{VERSION}). Run `unienv update`.")
+        else:
+            info(f"UniEnv v{VERSION} is up to date (latest: {latest}).")
+        return 0
+
     share = UNIENV_HOME / "share"
     if share.is_symlink():
         die(f"{share} links to a development checkout; update it with `git pull` instead.")
-    no_wire = args.no_wire or not load_state(load_recipes()).get("options", {}).get("wire_shells", True)
-    url = REPO_TARBALL.format(ref=args.ref)
+    ref = getattr(args, "ref", None)
+    explicit_ref = bool(ref)
+    if not ref:
+        ref = _latest_release_tag()
+        if not ref:
+            die(
+                "could not resolve the latest UniEnv release tag; "
+                "pass `unienv update --ref main` to install from main without release verification"
+            )
+    is_release = not explicit_ref or _is_release_tag(ref)
+    explicit_sha = getattr(args, "sha256", None)
+    expected_sha = explicit_sha
+    if not expected_sha and is_release:
+        expected_sha = _fetch_release_sha256(ref)
+    if not is_release and not expected_sha:
+        warn(f"installing {ref} without checksum verification")
+
+    no_wire = getattr(args, "no_wire", False) or not load_state(load_recipes()).get("options", {}).get(
+        "wire_shells", True
+    )
+    use_release_asset = is_release and not explicit_sha
+    url = RELEASE_TARBALL.format(ref=ref) if use_release_asset else REPO_TARBALL.format(ref=ref)
     step(f"Downloading {url}")
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "unienv.tar.gz"
@@ -1825,20 +2201,52 @@ def cmd_update(args) -> int:
             with urllib.request.urlopen(url) as resp, archive.open("wb") as out:
                 shutil.copyfileobj(resp, out)
         except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
-            die(f"could not download UniEnv ref {args.ref!r} ({e}); check the branch or tag name")
-        with tarfile.open(archive) as tar:
-            _safe_extract_tar(tar, Path(tmp))
-        src = next(Path(tmp).glob("unienv-ai-*"))
+            die(f"could not download UniEnv ref {ref!r} ({e}); check the branch or tag name")
+        if expected_sha:
+            actual_sha = hashlib.sha256(archive.read_bytes()).hexdigest().lower()
+            if actual_sha != expected_sha.lower():
+                die(f"SHA-256 mismatch for {ref}: expected {expected_sha.lower()}, got {actual_sha}")
+
+        prev_share = UNIENV_HOME / "share.prev"
         new_share = UNIENV_HOME / "share.new"
+        shutil.rmtree(prev_share, ignore_errors=True)
         shutil.rmtree(new_share, ignore_errors=True)
-        new_share.mkdir(parents=True)
-        for part in ("src", "recipes", "templates", "shims"):
-            shutil.copytree(src / part, new_share / part)
-    shutil.rmtree(share, ignore_errors=True)
-    new_share.rename(share)
-    step("Re-installing with the new version")
-    cli = share / "src/unienv.py"
-    return subprocess.call([sys.executable, str(cli), "install"] + (["--no-wire"] if no_wire else []))
+        if share.exists():
+            shutil.copytree(share, prev_share)
+        install_args = ["install"] + (["--no-wire"] if no_wire else [])
+        try:
+            with tarfile.open(archive) as tar:
+                _safe_extract_tar(tar, Path(tmp))
+            src = next(Path(tmp).glob("unienv-ai-*"))
+            new_share.mkdir(parents=True)
+            for part in ("src", "recipes", "templates", "shims"):
+                shutil.copytree(src / part, new_share / part)
+            shutil.rmtree(share, ignore_errors=True)
+            new_share.rename(share)
+            step("Re-installing with the new version")
+            cli = share / "src/unienv.py"
+            rc = subprocess.call([sys.executable, str(cli), *install_args])
+            if rc != 0:
+                raise RuntimeError(f"install exited with code {rc}")
+        except BaseException as e:
+            warn(f"update failed ({e}); restoring previous share from {prev_share}")
+            shutil.rmtree(new_share, ignore_errors=True)
+            if prev_share.exists():
+                shutil.rmtree(share, ignore_errors=True)
+                prev_share.rename(share)
+                old_cli = share / "src/unienv.py"
+                if old_cli.exists():
+                    try:
+                        restore_rc = subprocess.call([sys.executable, str(old_cli), *install_args])
+                        if restore_rc != 0:
+                            warn(f"rollback restore exited with code {restore_rc}; run unienv install to repair")
+                    except BaseException as restore_err:
+                        warn(f"rollback restore failed ({restore_err}); run unienv install to repair")
+            if not isinstance(e, Exception):
+                raise
+            return 1
+        shutil.rmtree(prev_share, ignore_errors=True)
+        return 0
 
 
 # ── doctor ──────────────────────────────────────────────────────────────────
@@ -2232,10 +2640,23 @@ def _remove_windows_path() -> None:
                 del parts[i]
                 break
         winreg.SetValueEx(key, "Path", 0, kind, ";".join(parts))
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        ctypes.windll.user32.SendMessageTimeoutW(
+            0xFFFF,  # HWND_BROADCAST
+            0x001A,  # WM_SETTINGCHANGE
+            0,
+            "Environment",
+            0x0002,  # SMTO_ABORTIFHUNG
+            5000,
+            None,
+        )
     marker.unlink()
 
 
 def cmd_uninstall(args) -> int:
+    _uninstall_sandbox()
     _remove_windows_path()
     for rc in SHELL_FILES:
         try:
@@ -2274,6 +2695,331 @@ def cmd_uninstall(args) -> int:
         shutil.rmtree(UNIENV_HOME)
         info(f"  deleted {UNIENV_HOME}")
     info("✓ UniEnv unwired. System packages installed with Homebrew/apt were left in place.")
+    return 0
+
+
+# ── sandbox profiles ────────────────────────────────────────────────────────
+
+
+def _sandbox_read_roots() -> list[str]:
+    return [str(UNIENV_HOME)]
+
+
+def _toml_text(data: dict) -> str:
+    """Serialize parsed TOML values without changing their types or table scope."""
+
+    def value(item):
+        if isinstance(item, str):
+            return json.dumps(item, ensure_ascii=False)
+        if isinstance(item, bool):
+            return str(item).lower()
+        if isinstance(item, (int, float)):
+            return repr(item)
+        if isinstance(item, list):
+            return "[" + ", ".join(value(v) for v in item) + "]"
+        if isinstance(item, dict):
+            return (
+                "{ " + ", ".join(json.dumps(k, ensure_ascii=False) + " = " + value(v) for k, v in item.items()) + " }"
+            )
+        if isinstance(item, (_dt.datetime, _dt.date, _dt.time)):
+            return item.isoformat()
+        raise ValueError(f"unsupported TOML value: {type(item).__name__}")
+
+    def fmt_key(k: str) -> str:
+        return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k, ensure_ascii=False)
+
+    scalars = [f"{fmt_key(k)} = {value(v)}" for k, v in data.items() if not isinstance(v, dict)]
+    tables = []
+    for k, v in data.items():
+        if isinstance(v, dict):
+            body = "\n".join(f"{fmt_key(sk)} = {value(sv)}" for sk, sv in v.items())
+            tables.append(f"[{fmt_key(k)}]\n{body}" if body else f"[{fmt_key(k)}]")
+    parts = (["\n".join(scalars)] if scalars else []) + tables
+    return "\n\n".join(parts) + "\n" if parts else ""
+
+
+def _edit_codex_sandbox_toml(
+    raw: str,
+    desired_roots: list[str] | None,
+    *,
+    remove_table_if_empty: bool = False,
+) -> str:
+    """Surgically update only [sandbox_workspace_write].writable_roots in TOML text."""
+    roots_lit = (
+        "[" + ", ".join(json.dumps(r, ensure_ascii=False) for r in desired_roots) + "]"
+        if desired_roots is not None
+        else None
+    )
+    hdr = re.search(r"(?m)^[ \t]*\[sandbox_workspace_write\][ \t]*(?:#.*)?$", raw)
+    if hdr is None:
+        if roots_lit is None:
+            return raw
+        sep = "" if not raw else ("\n" if raw.endswith("\n") else "\n\n")
+        return f"{raw}{sep}[sandbox_workspace_write]\nwritable_roots = {roots_lit}\n"
+
+    next_hdr = re.search(r"(?m)^[ \t]*\[(?:\[)?[^\]\n]+\](?:\])?[ \t]*(?:#.*)?$", raw[hdr.end() :])
+    sec_start = hdr.end()
+    sec_end = sec_start + next_hdr.start() if next_hdr else len(raw)
+    sec = raw[sec_start:sec_end]
+    wr = re.search(
+        r"(?ms)^([ \t]*writable_roots[ \t]*=[ \t]*)(\[[^\]]*\])([ \t]*(?:#[^\n]*)?)(?:\r?\n|$)",
+        sec,
+    )
+    if roots_lit is not None:
+        if wr is not None:
+            new_sec = sec[: wr.start(2)] + roots_lit + sec[wr.end(2) :]
+        else:
+            new_sec = f"\nwritable_roots = {roots_lit}" + sec
+        return raw[:sec_start] + new_sec + raw[sec_end:]
+
+    # Removing writable_roots key (and optionally the table if empty)
+    if wr is not None:
+        new_sec = sec[: wr.start()] + sec[wr.end() :]
+    else:
+        new_sec = sec
+    if remove_table_if_empty:
+        remaining = [ln.strip() for ln in new_sec.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        if not remaining:
+            prefix = raw[: hdr.start()].rstrip("\n")
+            suffix = raw[sec_end:].lstrip("\n")
+            if prefix and suffix:
+                return prefix + "\n\n" + suffix
+            if prefix:
+                return prefix + "\n"
+            return suffix
+    return raw[:sec_start] + new_sec + raw[sec_end:]
+
+
+def sandbox_profile(tool: str) -> str:
+    root = str(UNIENV_HOME)
+    if tool == "claude":
+        return json.dumps(
+            {
+                "permissions": {"allow": [f"Read(/{UNIENV_HOME.as_posix()}/**)"]},
+                "sandbox": {"filesystem": {"allowRead": [root], "allowWrite": [root]}},
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    if tool == "codex":
+        return f"[sandbox_workspace_write]\nwritable_roots = [{json.dumps(root, ensure_ascii=False)}]\n"
+    if tool in ("gemini", "seatbelt"):
+        escaped = json.dumps(root, ensure_ascii=False)
+        return (
+            ";; Merge into an existing Seatbelt profile; this is not a complete policy.\n"
+            f"(allow file-read* file-map-executable (subpath {escaped}))\n"
+            f"(allow file-write* (subpath {escaped}))"
+        )
+    die(f"unknown sandbox tool: {tool}")
+
+
+def _sandbox_load(path: Path, tool: str) -> dict:
+    try:
+        raw = path.read_text(encoding="utf-8") if path.exists() else ""
+        data = tomllib.loads(raw) if tool == "codex" else (json.loads(raw) if raw.strip() else {})
+        if not isinstance(data, dict):
+            raise ValueError("expected a configuration object")
+        return data
+    except (ValueError, OSError) as exc:
+        die(f"cannot read sandbox settings {path}: {exc}")
+
+
+def _sandbox_state() -> tuple[Path, dict]:
+    path = UNIENV_HOME / "sandbox-settings.json"
+    return path, _sandbox_load(path, "claude")
+
+
+def _read_text_with_eol(path: Path) -> tuple[str, str]:
+    if not path.exists():
+        return "", "\n"
+    with path.open("r", encoding="utf-8", newline="") as f:
+        raw = f.read()
+    eol = "\r\n" if "\r\n" in raw else "\n"
+    return raw.replace("\r\n", "\n"), eol
+
+
+def _write_preserving_link_and_mode(path: Path, text: str, *, eol: str = "\n") -> None:
+    target = Path(os.path.realpath(path)) if path.is_symlink() else path
+    mode = (target.stat().st_mode & 0o7777) if target.exists() else None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.parent / f".{target.name}.tmp.{os.getpid()}"
+    data = text.replace("\n", eol).encode("utf-8")
+    try:
+        tmp.write_bytes(data)
+        if mode is not None:
+            with contextlib.suppress(OSError):
+                tmp.chmod(mode)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _sandbox_write(
+    path: Path,
+    data: dict,
+    tool: str,
+    *,
+    raw_text: str | None = None,
+    action: str = "install",
+    eol: str = "\n",
+) -> None:
+    if tool == "codex":
+        text = raw_text if raw_text is not None else _toml_text(data)
+        hint = (
+            f"remove {UNIENV_HOME} from writable_roots manually"
+            if action == "uninstall"
+            else f"add this snippet manually:\n{sandbox_profile('codex')}"
+        )
+        try:
+            parsed = tomllib.loads(text)
+        except ValueError as exc:
+            die(f"cannot safely edit {path} ({exc}); {hint}")
+        if parsed != data:
+            die(f"cannot safely update {path} without altering existing tables; {hint}")
+    else:
+        text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    if path.exists():
+        backup = path.with_name(path.name + f".unienv-backup-{_dt.datetime.now():%Y%m%d-%H%M%S-%f}")
+        shutil.copy2(path, backup)
+    _write_preserving_link_and_mode(path, text, eol=eol)
+
+
+def _sandbox_fields(tool: str) -> dict[tuple[str, ...], list[str]]:
+    root = str(UNIENV_HOME)
+    if tool == "codex":
+        return {("sandbox_workspace_write", "writable_roots"): [root]}
+    return {
+        ("permissions", "allow"): [f"Read(/{UNIENV_HOME.as_posix()}/**)"],
+        ("sandbox", "filesystem", "allowRead"): [root],
+        ("sandbox", "filesystem", "allowWrite"): [root],
+    }
+
+
+def _install_sandbox(path: Path, tool: str) -> bool:
+    raw, eol = _read_text_with_eol(path)
+    data = _sandbox_load(path, tool)
+    state_path, state = _sandbox_state()
+    key = str(path.resolve())
+    record = state.get(key, {"tool": tool, "added": {}, "created": [], "new_file": not path.exists()})
+    changed = False
+    for fields, additions in _sandbox_fields(tool).items():
+        parent = data
+        for index, field in enumerate(fields[:-1]):
+            if field not in parent:
+                parent[field] = {}
+                record["created"].append(list(fields[: index + 1]))
+            if not isinstance(parent[field], dict):
+                die(f"{path}: {'.'.join(fields[: index + 1])} must be a table/object")
+            parent = parent[field]
+        name = fields[-1]
+        if name not in parent:
+            parent[name] = []
+            record["created"].append(list(fields))
+        values = parent[name]
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            die(f"{path}: {'.'.join(fields)} must be a list of strings")
+        for item in additions:
+            if item not in values:
+                values.append(item)
+                record["added"].setdefault(".".join(fields), []).append(item)
+                changed = True
+    if not changed:
+        return False
+    raw_text = (
+        _edit_codex_sandbox_toml(raw, data["sandbox_workspace_write"]["writable_roots"]) if tool == "codex" else None
+    )
+    _sandbox_write(path, data, tool, raw_text=raw_text, action="install", eol=eol)
+    state[key] = record
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(state_path, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+    return True
+
+
+def _uninstall_sandbox() -> None:
+    try:
+        state_path, state = _sandbox_state()
+    except (Exception, SystemExit) as exc:
+        detail = "" if isinstance(exc, SystemExit) else f": {exc}"
+        warn(f"could not read sandbox state{detail}")
+        return
+    for key, record in list(state.items()):
+        path = Path(key)
+        try:
+            raw, eol = _read_text_with_eol(path)
+            data = _sandbox_load(path, record["tool"])
+            for dotted, items in record["added"].items():
+                fields = dotted.split(".")
+                parent = data
+                for field in fields[:-1]:
+                    parent = parent.get(field, {}) if isinstance(parent, dict) else {}
+                values = parent.get(fields[-1]) if isinstance(parent, dict) else None
+                if isinstance(values, list):
+                    parent[fields[-1]] = [v for v in values if v not in items]
+            for fields in sorted(record["created"], key=len, reverse=True):
+                parent = data
+                for field in fields[:-1]:
+                    parent = parent.get(field, {}) if isinstance(parent, dict) else {}
+                if isinstance(parent, dict) and parent.get(fields[-1]) in ({}, []):
+                    parent.pop(fields[-1], None)
+            if path.exists():
+                if record["new_file"] and not data:
+                    target = Path(os.path.realpath(path)) if path.is_symlink() else path
+                    if path.is_symlink():
+                        path.unlink()
+                    if target.exists():
+                        target.unlink()
+                else:
+                    raw_text = None
+                    if record["tool"] == "codex":
+                        sww = data.get("sandbox_workspace_write")
+                        desired_roots = sww.get("writable_roots") if isinstance(sww, dict) else None
+                        raw_text = _edit_codex_sandbox_toml(
+                            raw,
+                            desired_roots,
+                            remove_table_if_empty=["sandbox_workspace_write"] in record["created"],
+                        )
+                    _sandbox_write(path, data, record["tool"], raw_text=raw_text, action="uninstall", eol=eol)
+            del state[key]
+        except (Exception, SystemExit) as exc:
+            detail = "" if isinstance(exc, SystemExit) else f": {exc}"
+            warn(f"could not remove sandbox settings from {path}{detail}")
+    if state:
+        atomic_write(state_path, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+    elif state_path.exists():
+        state_path.unlink()
+
+
+def _install_claude_sandbox(path: Path) -> bool:
+    return _install_sandbox(path, "claude")
+
+
+def _install_codex_sandbox(path: Path) -> bool:
+    return _install_sandbox(path, "codex")
+
+
+def cmd_sandbox(args) -> int:
+    if args.action == "print":
+        tools = ("claude", "codex", "seatbelt") if args.tool == "all" else (args.tool,)
+        for tool in tools:
+            print(sandbox_profile(tool))
+        return 0
+    if args.tool not in ("claude", "codex", "all"):
+        die("sandbox install supports claude, codex, or all")
+    tools = ("claude", "codex") if args.tool == "all" else (args.tool,)
+    for tool in tools:
+        path = (
+            HOME / ".claude/settings.json"
+            if tool == "claude"
+            else Path(os.environ.get("CODEX_HOME", HOME / ".codex")) / "config.toml"
+        )
+        if args.tool == "all" and not path.parent.exists() and not which(tool):
+            info(f"  {tool}: skipped (not detected)")
+            continue
+        changed = _install_sandbox(path, tool)
+        info(f"  {tool}: {'updated' if changed else 'already configured'} ({path})")
+        if tool == "codex":
+            info("  Codex writable_roots applies in workspace-write mode; the current sandbox mode was not changed.")
     return 0
 
 
@@ -2385,6 +3131,15 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.add_argument("-y", "--yes", action="store_true")
     s.set_defaults(fn=cmd_need)
 
+    s = sub.add_parser("remove", help="remove a package previously added with `unienv need`")
+    s.add_argument("packages", nargs="+")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--node", action="store_true", help="npm package")
+    g.add_argument("--bin", action="store_true", help="system tool (Homebrew formula / apt package)")
+    g.add_argument("--cask", action="store_true", help="macOS app (Homebrew cask)")
+    s.add_argument("-y", "--yes", action="store_true", help="also uninstall system packages via brew/apt")
+    s.set_defaults(fn=cmd_remove)
+
     s = sub.add_parser("upgrade", help="upgrade installed Python and Node packages with automatic rollback")
     s.add_argument("packages", nargs="*", help="specific packages to upgrade (default: all)")
     s.add_argument("--node", action="store_true", help="upgrade Node packages")
@@ -2417,7 +3172,9 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.set_defaults(fn=cmd_status)
 
     s = sub.add_parser("update", help="download the latest UniEnv and re-install with it")
-    s.add_argument("--ref", default="main", help="branch or tag to install (default: main)")
+    s.add_argument("--ref", default=None, help="branch or tag to install (default: latest release, or main)")
+    s.add_argument("--sha256", default=None, help="expected SHA-256 checksum of the downloaded tarball")
+    s.add_argument("--check", action="store_true", help="check whether a newer UniEnv release is available")
     s.add_argument("--no-wire", action="store_true")
     s.set_defaults(fn=cmd_update)
 
@@ -2434,14 +3191,25 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s = sub.add_parser("path", help="print the UniEnv bin directory")
     s.set_defaults(fn=lambda a: print(BIN) or 0)
 
+    s = sub.add_parser("sandbox", help="print or install sandbox allow-rules for Claude Code, Codex, Gemini/Seatbelt")
+    s.add_argument("action", nargs="?", default="print", choices=["print", "install"])
+    s.add_argument(
+        "--tool",
+        default="all",
+        choices=["claude", "codex", "gemini", "seatbelt", "all"],
+        help="which tool profile to print or install (default: all)",
+    )
+    s.set_defaults(fn=cmd_sandbox)
+
     s = sub.add_parser("du", help="show disk usage of py, node, backups and total UNIENV_HOME")
     s.set_defaults(fn=cmd_du)
 
     args = p.parse_args(argv)
     mutating = (
-        args.cmd in ("install", "need", "sync", "uninstall", "wire")
+        args.cmd in ("install", "need", "remove", "sync", "uninstall", "wire")
         or (args.cmd == "upgrade" and not args.dry_run)
         or (args.cmd == "doctor" and args.fix)
+        or (args.cmd == "sandbox" and args.action == "install")
     )
     try:
         with state_lock() if mutating else contextlib.nullcontext():

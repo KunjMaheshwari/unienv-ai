@@ -31,21 +31,27 @@ class LinuxPlatformKeyTest(unittest.TestCase):
             os_rel.write_text("ID=fedora\nVERSION_ID=41\n")
             with (
                 mock.patch.object(unienv, "IS_MAC", False),
-                mock.patch.object(unienv, "_os_release_tokens", return_value=unienv._os_release_tokens(os_rel)),
+                mock.patch.object(unienv, "_os_release_info", return_value=unienv._os_release_info(os_rel)),
                 mock.patch.object(Path, "exists", return_value=False),
             ):
                 self.assertEqual(unienv.platform_key(), "fedora")
 
-    def test_rhel_clones_do_not_use_fedora_packages_without_epel(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            os_rel = Path(tmp) / "os-release"
-            os_rel.write_text('ID="rocky"\nID_LIKE="rhel centos fedora"\n')
-            with (
-                mock.patch.object(unienv, "IS_MAC", False),
-                mock.patch.object(unienv, "_os_release_tokens", return_value=unienv._os_release_tokens(os_rel)),
-                mock.patch.object(Path, "exists", return_value=False),
-            ):
-                self.assertEqual(unienv.platform_key(), sys.platform)
+    def test_rhel_oracle_amazon_clones_do_not_map_to_fedora(self):
+        for content in (
+            'ID="rocky"\nID_LIKE="rhel centos fedora"\n',
+            'ID="ol"\nID_LIKE="fedora"\n',
+            'ID="amzn"\nID_LIKE="fedora"\n',
+        ):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as tmp:
+                os_rel = Path(tmp) / "os-release"
+                os_rel.write_text(content)
+                with (
+                    mock.patch.object(unienv, "IS_MAC", False),
+                    mock.patch.object(unienv, "_os_release_info", return_value=unienv._os_release_info(os_rel)),
+                    mock.patch.object(Path, "exists", return_value=False),
+                    mock.patch.object(unienv, "which", return_value=None),
+                ):
+                    self.assertEqual(unienv.platform_key(), sys.platform)
 
     def test_detects_arch_via_os_release(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -53,23 +59,23 @@ class LinuxPlatformKeyTest(unittest.TestCase):
             os_rel.write_text("ID=arch\n")
             with (
                 mock.patch.object(unienv, "IS_MAC", False),
-                mock.patch.object(unienv, "_os_release_tokens", return_value=unienv._os_release_tokens(os_rel)),
+                mock.patch.object(unienv, "_os_release_info", return_value=unienv._os_release_info(os_rel)),
                 mock.patch.object(Path, "exists", return_value=False),
             ):
                 self.assertEqual(unienv.platform_key(), "arch")
 
-    def test_detects_fedora_or_arch_via_which_fallback(self):
+    def test_which_fallback_matches_pacman_but_not_dnf(self):
         with (
             mock.patch.object(unienv, "IS_MAC", False),
-            mock.patch.object(unienv, "_os_release_tokens", return_value=set()),
+            mock.patch.object(unienv, "_os_release_info", return_value=("", set())),
             mock.patch.object(Path, "exists", return_value=False),
             mock.patch.object(unienv, "which", side_effect=lambda b: "/usr/bin/dnf" if b == "dnf" else None),
         ):
-            self.assertEqual(unienv.platform_key(), "fedora")
+            self.assertEqual(unienv.platform_key(), sys.platform)
 
         with (
             mock.patch.object(unienv, "IS_MAC", False),
-            mock.patch.object(unienv, "_os_release_tokens", return_value=set()),
+            mock.patch.object(unienv, "_os_release_info", return_value=("", set())),
             mock.patch.object(Path, "exists", return_value=False),
             mock.patch.object(unienv, "which", side_effect=lambda b: "/usr/bin/pacman" if b == "pacman" else None),
         ):
@@ -132,8 +138,8 @@ class LinuxInstallSystemTest(unittest.TestCase):
 
         def fake_run(cmd, **kw):
             cmds.append(cmd)
-            if cmd[:2] == ["rpm", "-q"]:
-                return _result(cmd, code=0 if cmd[2] == "jq" else 1)
+            if cmd[:3] == ["rpm", "-q", "--whatprovides"]:
+                return _result(cmd, code=0 if cmd[3] == "jq" else 1)
             return _result(cmd, code=0)
 
         w = {"dnf": ["jq", "ripgrep"], "bins": []}
