@@ -4,11 +4,14 @@ import argparse
 import contextlib
 import importlib.util
 import io
-import os
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _isolation import isolated_home  # noqa: E402
 
 ROOT = Path(__file__).parents[2]
 spec = importlib.util.spec_from_file_location("unienv", ROOT / "src" / "unienv.py")
@@ -52,11 +55,7 @@ class DotfileResilienceTests(unittest.TestCase):
 
             err = io.StringIO()
             with (
-                patch.dict(os.environ, {"ZDOTDIR": ""}),
-                patch.object(u, "HOME", root),
-                patch.object(u, "STATE_FILE", root / ".unienv" / "state.json"),
-                patch.object(u, "ENV_SH", root / ".unienv" / "env.sh"),
-                patch.object(u, "SHELL_FILES", [ro, ok]),
+                isolated_home(u, root, shell_files=[ro, ok]),
                 patch.object(u, "upsert_block", side_effect=fake_upsert),
                 contextlib.redirect_stderr(err),
             ):
@@ -126,11 +125,9 @@ class DotfileResilienceTests(unittest.TestCase):
             args = argparse.Namespace(purge=False)
             err = io.StringIO()
             with (
-                patch.object(u, "SHELL_FILES", [ro_rc, ok_rc]),
+                isolated_home(u, root, shell_files=[ro_rc, ok_rc]),
                 patch.object(u, "agent_targets", return_value=agents),
                 patch.object(u, "mcp_clients", return_value={}),
-                patch.object(u, "LAUNCH_AGENT", root / "none.plist"),
-                patch.object(u, "UNIENV_HOME", root / ".unienv"),
                 patch.object(u, "remove_block", side_effect=fake_remove),
                 contextlib.redirect_stderr(err),
             ):
