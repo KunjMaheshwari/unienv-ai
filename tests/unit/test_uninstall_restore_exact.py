@@ -1,10 +1,12 @@
 import argparse
-import os
 import importlib.util
 import pathlib
 import tempfile
+import sys
 import unittest
-from unittest.mock import patch
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _isolation import isolated_home  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("unienv", ROOT / "src" / "unienv.py")
@@ -45,17 +47,7 @@ class UninstallRestoreExactTests(unittest.TestCase):
                 p.write_bytes(raw)
 
             shell_files = [home / f for f in (".zshenv", ".profile", ".bashrc", ".bash_profile", ".bash_login")]
-            with (
-                patch.dict(os.environ, {"ZDOTDIR": "", "XDG_CONFIG_HOME": str(home / ".config")}),
-                patch.object(u, "HOME", home),
-                patch.object(u, "STATE_FILE", home / ".unienv" / "state.json"),
-                patch.object(u, "which", return_value=None),
-                patch.object(u, "UNIENV_HOME", ue_home),
-                patch.object(u, "ENV_SH", ue_home / "env.sh"),
-                patch.object(u, "AGENTS_COPY", ue_home / "AGENTS.md"),
-                patch.object(u, "SHELL_FILES", shell_files),
-                patch.object(u, "LAUNCH_AGENT", home / "Library/LaunchAgents/ai.unienv.path.plist"),
-            ):
+            with isolated_home(u, home, unienv_home=ue_home, shell_files=shell_files):
                 u.wire_shells()
                 u.sync_agents(self._dummy_manifest(), list(u.load_recipes().values()), only_detected=True)
 
@@ -91,16 +83,7 @@ class UninstallRestoreExactTests(unittest.TestCase):
             zshenv = home / ".zshenv"
             zshenv.write_bytes(b"export NO_TRAILING_NL=1")
 
-            with (
-                patch.dict(os.environ, {"ZDOTDIR": "", "XDG_CONFIG_HOME": str(home / ".config")}),
-                patch.object(u, "HOME", home),
-                patch.object(u, "STATE_FILE", home / ".unienv" / "state.json"),
-                patch.object(u, "which", return_value=None),
-                patch.object(u, "UNIENV_HOME", ue_home),
-                patch.object(u, "ENV_SH", ue_home / "env.sh"),
-                patch.object(u, "SHELL_FILES", [zshenv]),
-                patch.object(u, "LAUNCH_AGENT", home / "Library/LaunchAgents/ai.unienv.path.plist"),
-            ):
+            with isolated_home(u, home, unienv_home=ue_home, shell_files=[zshenv]):
                 u.wire_shells()
                 self.assertIsNotNone(u.read_block(zshenv, u.SHELL_BEGIN, u.SHELL_END))
                 u.cmd_uninstall(argparse.Namespace(purge=False))

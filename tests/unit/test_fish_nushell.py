@@ -7,9 +7,13 @@ import io
 import json
 import os
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _isolation import isolated_home  # noqa: E402
 
 ROOT = Path(__file__).parents[2]
 spec = importlib.util.spec_from_file_location("unienv", ROOT / "src" / "unienv.py")
@@ -27,13 +31,14 @@ class FishNushellTests(unittest.TestCase):
             (home / ".config/nushell/env.nu").write_text("# user nushell config\n")
 
             with (
-                patch.object(u, "HOME", home),
-                patch.object(u, "UNIENV_HOME", unienv_home),
-                patch.object(u, "ENV_SH", unienv_home / "env.sh"),
-                patch.object(u, "SHELL_FILES", [home / ".zshenv", home / ".profile", home / ".bashrc"]),
+                isolated_home(
+                    u,
+                    home,
+                    unienv_home=unienv_home,
+                    shell_files=[home / ".zshenv", home / ".profile", home / ".bashrc"],
+                    extra_env={"XDG_CONFIG_HOME": ""},
+                ),
                 patch.object(u, "IS_MAC", False),
-                patch.dict(os.environ, {"XDG_CONFIG_HOME": ""}),
-                patch.object(u, "which", return_value=None),
             ):
                 changed = u.wire_shells({"options": {"wire_homebrew": False}})
                 self.assertIn(str(home / ".config/fish/conf.d/unienv.fish").replace(str(home), "~"), changed)
@@ -79,7 +84,7 @@ class FishNushellTests(unittest.TestCase):
             ):
                 with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}):
                     self.assertEqual(u._fish_conf_path(), xdg / "fish/conf.d/unienv.fish")
-                    self.assertEqual(u._nu_env_path(), xdg / "nushell/env.nu")
+                    self.assertEqual(u._nu_config_dir() / "env.nu", xdg / "nushell/env.nu")
                 with patch.dict(os.environ, {"XDG_CONFIG_HOME": ""}):
                     self.assertEqual(u._nu_config_dir(), home / "Library/Application Support/nushell")
 

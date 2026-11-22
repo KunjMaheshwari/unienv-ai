@@ -7,9 +7,13 @@ import io
 import json
 import os
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _isolation import isolated_home  # noqa: E402
 
 ROOT = Path(__file__).parents[2]
 spec = importlib.util.spec_from_file_location("unienv", ROOT / "src" / "unienv.py")
@@ -23,16 +27,14 @@ class ZdotdirTests(unittest.TestCase):
             home = Path(tmp)
             zdot = home / ".config/zsh"
             unienv_home = home / ".unienv"
-            env_sh = unienv_home / "env.sh"
             shell_files = [home / ".zshenv", home / ".profile"]
 
-            with (
-                patch.dict(os.environ, {"ZDOTDIR": str(zdot)}),
-                patch.object(u, "HOME", home),
-                patch.object(u, "UNIENV_HOME", unienv_home),
-                patch.object(u, "STATE_FILE", unienv_home / "state.json"),
-                patch.object(u, "ENV_SH", env_sh),
-                patch.object(u, "SHELL_FILES", shell_files),
+            with isolated_home(
+                u,
+                home,
+                unienv_home=unienv_home,
+                shell_files=shell_files,
+                extra_env={"ZDOTDIR": str(zdot)},
             ):
                 changed = u.wire_shells()
                 self.assertIn(str(zdot / ".zshenv").replace(str(home), "~"), changed)
@@ -58,24 +60,12 @@ class ZdotdirTests(unittest.TestCase):
             home = Path(tmp)
             zdot = home / ".config/zsh"
             unienv_home = home / ".unienv"
-            env_sh = unienv_home / "env.sh"
             shell_files = [home / ".zshenv", home / ".profile"]
 
             with (
-                patch.object(u, "HOME", home),
-                patch.object(u, "UNIENV_HOME", unienv_home),
-                patch.object(u, "STATE_FILE", unienv_home / "state.json"),
-                patch.object(u, "BACKUP_DIR", unienv_home / "backups"),
-                patch.object(u, "BIN", unienv_home / "bin"),
-                patch.object(u, "PY_DIR", unienv_home / "py"),
-                patch.object(u, "NODE_DIR", unienv_home / "node"),
-                patch.object(u, "MANIFEST_FILE", unienv_home / "manifest.json"),
-                patch.object(u, "LOG_FILE", unienv_home / "log" / "events.jsonl"),
-                patch.object(u, "ENV_SH", env_sh),
-                patch.object(u, "SHELL_FILES", shell_files),
+                isolated_home(u, home, unienv_home=unienv_home, shell_files=shell_files),
                 patch.object(u, "agent_targets", return_value=[]),
                 patch.object(u, "mcp_clients", return_value={}),
-                patch.object(u, "LAUNCH_AGENT", home / "none.plist"),
                 patch.object(u, "install_node", return_value=None),
                 patch.object(u, "write_shims", return_value=None),
                 patch.object(u, "sync_agents", return_value=[]),
@@ -130,20 +120,16 @@ class ZdotdirTests(unittest.TestCase):
             manifest = unienv_home / "manifest.json"
             manifest.write_text("{}")
 
-            stack.enter_context(patch.dict(os.environ, {"ZDOTDIR": str(zdot), "UNIENV_HOME": str(unienv_home)}))
-            for name, value in {
-                "HOME": home,
-                "UNIENV_HOME": unienv_home,
-                "STATE_FILE": unienv_home / "state.json",
-                "BACKUP_DIR": unienv_home / "backups",
-                "BIN": bin_dir,
-                "PY_DIR": unienv_home / "py",
-                "ENV_SH": unienv_home / "env.sh",
-                "MANIFEST_FILE": manifest,
-                "SHELL_FILES": [home / ".zshenv", home / ".profile"],
-                "IS_MAC": False,
-            }.items():
-                stack.enter_context(patch.object(u, name, value))
+            stack.enter_context(
+                isolated_home(
+                    u,
+                    home,
+                    unienv_home=unienv_home,
+                    shell_files=[home / ".zshenv", home / ".profile"],
+                    extra_env={"ZDOTDIR": str(zdot), "UNIENV_HOME": str(unienv_home)},
+                )
+            )
+            stack.enter_context(patch.object(u, "IS_MAC", False))
             for name, value in {
                 "load_recipes": {},
                 "load_state": {"options": {"exclude": [], "wire_homebrew": False}},

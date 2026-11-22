@@ -12,6 +12,12 @@ brew = ["tectonic"]
 [system.debian]
 apt = []
 
+[system.fedora]
+dnf = []
+
+[system.arch]
+pacman = ["tectonic"]
+
 [verify]
 bins = ["tectonic"]
 

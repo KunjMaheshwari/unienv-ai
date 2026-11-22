@@ -14,6 +14,9 @@ import time
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _isolation import isolated_home  # noqa: E402
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("unienv", ROOT / "src" / "unienv.py")
 u = importlib.util.module_from_spec(spec)
@@ -24,8 +27,7 @@ class UninstallMcpTests(unittest.TestCase):
     def test_uninstall_removes_only_the_unienv_server(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
             home = pathlib.Path(tmp)
-            for name, value in {"HOME": home, "SHELL_FILES": [], "LAUNCH_AGENT": home / "none.plist"}.items():
-                stack.enter_context(patch.object(u, name, value))
+            stack.enter_context(isolated_home(u, home, shell_files=[]))
             configs = list(u.mcp_clients().values())
             for path in configs:
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,8 +42,7 @@ class UninstallMcpTests(unittest.TestCase):
     def test_uninstall_without_configs_creates_nothing(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
             home = pathlib.Path(tmp)
-            for name, value in {"HOME": home, "SHELL_FILES": [], "LAUNCH_AGENT": home / "none.plist"}.items():
-                stack.enter_context(patch.object(u, name, value))
+            stack.enter_context(isolated_home(u, home, shell_files=[]))
             with contextlib.redirect_stdout(io.StringIO()):
                 u.cmd_uninstall(argparse.Namespace(purge=False))
             self.assertEqual(list(home.iterdir()), [])
