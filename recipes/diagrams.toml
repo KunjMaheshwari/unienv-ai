@@ -16,6 +16,12 @@ brew = ["graphviz"]
 [system.debian]
 apt = ["graphviz"]
 
+[system.fedora]
+dnf = ["graphviz"]
+
+[system.arch]
+pacman = ["graphviz"]
+
 [verify]
 bins = ["dot"]
 

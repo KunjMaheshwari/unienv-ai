@@ -224,6 +224,11 @@ def tool_env() -> dict[str, str]:
     env.update(
         {"PATH": os.pathsep.join(path), "UNIENV_HOME": str(UNIENV_HOME), "PYTHONUNBUFFERED": "1", "MPLBACKEND": "Agg"}
     )
+    puppeteer_cache = UNIENV_HOME / "cache" / "puppeteer"
+    if "PUPPETEER_CACHE_DIR" in os.environ:
+        env["PUPPETEER_CACHE_DIR"] = os.environ["PUPPETEER_CACHE_DIR"]
+    elif puppeteer_cache.is_dir():
+        env["PUPPETEER_CACHE_DIR"] = str(puppeteer_cache)
     tmp = os.environ.get("TMPDIR", "/tmp")
     if sys.platform == "darwin" and (tmp == "/tmp" or tmp.startswith("/tmp/")):
         tmp = "/private" + tmp  # Leptonica rewrites /tmp paths (see env.sh)

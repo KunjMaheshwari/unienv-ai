@@ -646,6 +646,17 @@ def write_package_json(packages: list[str]) -> None:
     pj.write_text(json.dumps(data, indent=2) + "\n")
 
 
+def _uses_puppeteer(packages: list[str]) -> bool:
+    return any(node_name(p) in ("@mermaid-js/mermaid-cli", "puppeteer", "puppeteer-core") for p in packages)
+
+
+def _puppeteer_cache_env(packages: list[str]) -> dict[str, str] | None:
+    if not _uses_puppeteer(packages):
+        return None
+    cache_dir = os.environ.get("PUPPETEER_CACHE_DIR") or str(UNIENV_HOME / "cache" / "puppeteer")
+    return {"PUPPETEER_CACHE_DIR": cache_dir}
+
+
 def install_node(packages: list[str], *, require_npm: bool = False) -> None:
     if not packages:
         return
@@ -656,14 +667,10 @@ def install_node(packages: list[str], *, require_npm: bool = False) -> None:
         warn("npm not found; skipping Node batteries (install Node.js, then `unienv install`).")
         return
     write_package_json(packages)
-    npm_env = None
-    if any(p.startswith("@mermaid-js/mermaid-cli") or p.startswith("puppeteer") for p in packages):
-        cache_dir = os.environ.get("PUPPETEER_CACHE_DIR") or str(UNIENV_HOME / "cache" / "puppeteer")
-        npm_env = {"PUPPETEER_CACHE_DIR": cache_dir}
     run(
         [npm, "install", "--no-audit", "--no-fund", "--loglevel=error", "--progress=false", "--no-update-notifier"],
         cwd=NODE_DIR,
-        env=npm_env,
+        env=_puppeteer_cache_env(packages),
     )
 
 
@@ -785,7 +792,11 @@ def write_env_sh(state: dict) -> None:
         'case ":$PATH:" in *":$UNIENV_HOME/bin:"*) ;; *) PATH="$UNIENV_HOME/bin:$PATH" ;; esac',
         "export PATH",
     ]
-    if "diagrams" in state.get("batteries", []):
+    if (
+        "diagrams" in state.get("batteries", [])
+        or _uses_puppeteer(state.get("extras", {}).get("node", []))
+        or (UNIENV_HOME / "cache" / "puppeteer").is_dir()
+    ):
         lines.append('export PUPPETEER_CACHE_DIR="${PUPPETEER_CACHE_DIR:-$UNIENV_HOME/cache/puppeteer}"')
     lines += [
         "# `bash -c` (non-login, non-interactive) reads only $BASH_ENV.",
@@ -1638,6 +1649,7 @@ def cmd_upgrade(args) -> int:
                         *pkgs,
                     ],
                     cwd=NODE_DIR,
+                    env=_puppeteer_cache_env(w["node"]),
                 )
     except (subprocess.CalledProcessError, RuntimeError, SystemExit) as e:
         warn(f"upgrade failed ({e}); rolling back")
