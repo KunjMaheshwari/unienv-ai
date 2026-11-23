@@ -7,9 +7,13 @@ import io
 import json
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _isolation import isolated_home  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("unienv", ROOT / "src" / "unienv.py")
@@ -20,18 +24,7 @@ spec.loader.exec_module(u)
 class RemoveTests(unittest.TestCase):
     def _setup_home(self, stack, tmp_dir):
         root = pathlib.Path(tmp_dir)
-        stack.enter_context(patch.object(u, "HOME", root / "home"))
-        stack.enter_context(patch.object(u, "UNIENV_HOME", root))
-        stack.enter_context(patch.object(u, "BIN", root / "bin"))
-        stack.enter_context(patch.object(u, "PY_DIR", root / "py"))
-        stack.enter_context(patch.object(u, "NODE_DIR", root / "node"))
-        stack.enter_context(patch.object(u, "STATE_FILE", root / "state.json"))
-        stack.enter_context(patch.object(u, "MANIFEST_FILE", root / "manifest.json"))
-        stack.enter_context(patch.object(u, "ENV_SH", root / "env.sh"))
-        stack.enter_context(patch.object(u, "AGENTS_COPY", root / "AGENTS.md"))
-        stack.enter_context(patch.object(u, "BACKUP_DIR", root / "backups"))
-        stack.enter_context(patch.object(u, "LOG_FILE", root / "log" / "unienv.log"))
-        stack.enter_context(patch.object(u, "SHELL_FILES", []))
+        stack.enter_context(isolated_home(u, root / "home", unienv_home=root, shell_files=[]))
         return root
 
     def test_need_then_remove_restores_state_pyproject_and_agent_block(self):

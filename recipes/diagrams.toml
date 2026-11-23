@@ -1,0 +1,37 @@
+#:schema ../schema/recipe.schema.json
+schema = "unienv/recipe/v0"
+id = "diagrams"
+summary = "Render Graphviz (.dot) and Mermaid (.mmd) diagrams to SVG, PNG and PDF (~550 MB, opt-in)"
+default = false
+maintainers = ["github:rupeshbharambe24", "github:KunjMaheshwari"]
+license_note = "Graphviz EPL-1.0; mermaid-cli MIT"
+
+[node]
+packages = ["@mermaid-js/mermaid-cli"]
+modules = []
+
+[system.macos]
+brew = ["graphviz"]
+
+[system.debian]
+apt = ["graphviz"]
+
+[system.fedora]
+dnf = ["graphviz"]
+
+[system.arch]
+pacman = ["graphviz"]
+
+[system.windows]
+winget = ["Graphviz.Graphviz"]
+scoop = ["graphviz"]
+
+[verify]
+bins = ["dot"]
+
+[agent]
+notes = """
+- Render Graphviz `.dot` diagrams: `dot -Tpng in.dot -o out.png` or `dot -Tsvg in.dot -o out.svg`.
+- Render Mermaid `.mmd` diagrams: `$UNIENV_HOME/node/node_modules/.bin/mmdc -i in.mmd -o out.svg`.
+- In headless or sandboxed shells where Chromium needs `--no-sandbox`: `echo '{"args":["--no-sandbox"]}' > p.json; $UNIENV_HOME/node/node_modules/.bin/mmdc -p p.json -i in.mmd -o out.svg`.
+"""
