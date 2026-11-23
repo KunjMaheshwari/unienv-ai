@@ -750,6 +750,17 @@ def write_package_json(packages: list[str]) -> None:
     pj.write_text(json.dumps(data, indent=2) + "\n")
 
 
+def _uses_puppeteer(packages: list[str]) -> bool:
+    return any(node_name(p) in ("@mermaid-js/mermaid-cli", "puppeteer", "puppeteer-core") for p in packages)
+
+
+def _puppeteer_cache_env(packages: list[str]) -> dict[str, str] | None:
+    if not _uses_puppeteer(packages):
+        return None
+    cache_dir = os.environ.get("PUPPETEER_CACHE_DIR") or str(UNIENV_HOME / "cache" / "puppeteer")
+    return {"PUPPETEER_CACHE_DIR": cache_dir}
+
+
 def install_node(packages: list[str], *, require_npm: bool = False) -> None:
     if not packages:
         return
@@ -763,6 +774,7 @@ def install_node(packages: list[str], *, require_npm: bool = False) -> None:
     run(
         [npm, "install", "--no-audit", "--no-fund", "--loglevel=error", "--progress=false", "--no-update-notifier"],
         cwd=NODE_DIR,
+        env=_puppeteer_cache_env(packages),
     )
 
 
@@ -923,6 +935,14 @@ def write_env_sh(state: dict) -> None:
     lines += [
         'case ":$PATH:" in *":$UNIENV_HOME/bin:"*) ;; *) PATH="$UNIENV_HOME/bin:$PATH" ;; esac',
         "export PATH",
+    ]
+    if (
+        "diagrams" in state.get("batteries", [])
+        or _uses_puppeteer(state.get("extras", {}).get("node", []))
+        or (UNIENV_HOME / "cache" / "puppeteer").is_dir()
+    ):
+        lines.append('export PUPPETEER_CACHE_DIR="${PUPPETEER_CACHE_DIR:-$UNIENV_HOME/cache/puppeteer}"')
+    lines += [
         "# `bash -c` (non-login, non-interactive) reads only $BASH_ENV.",
         '[ -z "${BASH_ENV:-}" ] && export BASH_ENV="$UNIENV_HOME/env.sh"',
     ]
@@ -1824,6 +1844,7 @@ def cmd_upgrade(args) -> int:
                         *pkgs,
                     ],
                     cwd=NODE_DIR,
+                    env=_puppeteer_cache_env(w["node"]),
                 )
     except (subprocess.CalledProcessError, RuntimeError, SystemExit) as e:
         warn(f"upgrade failed ({e}); rolling back")

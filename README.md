@@ -160,6 +160,7 @@ It should use `ue-py`, `pdftotext` and `soffice-safe` directly, with no virtuale
 | `latex` | opt-in | Tectonic (`tectonic paper.tex` compiles LaTeX to PDF and downloads TeX packages on demand) |
 | `ml` | opt-in | scikit-learn, scipy, xgboost, lightgbm, imbalanced-learn, joblib (`libomp` / `libgomp1`) |
 | `speech` | opt-in | faster-whisper (CTranslate2, no PyTorch) + ffmpeg for local audio/video transcription |
+| `diagrams` | opt-in | Graphviz (`dot`) + `@mermaid-js/mermaid-cli` (`mmdc`) for rendering `.dot` and `.mmd` diagrams |
 
 Each battery is a small, declarative [TOML recipe](recipes/office.toml). **Adding one is the easiest way to contribute**: LaTeX, browsers, diagrams, GIS, audio… see [CONTRIBUTING.md](CONTRIBUTING.md#writing-a-recipe).
 
