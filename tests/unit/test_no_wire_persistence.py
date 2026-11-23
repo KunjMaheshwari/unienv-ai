@@ -10,6 +10,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _isolation import isolated_home  # noqa: E402
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("unienv", ROOT / "src" / "unienv.py")
 u = importlib.util.module_from_spec(spec)
@@ -22,18 +25,7 @@ class NoWirePersistenceTests(unittest.TestCase):
         home = root / "home"
         home.mkdir(parents=True, exist_ok=True)
         shell_files = [home / ".zshenv", home / ".profile"]
-        stack.enter_context(patch.object(u, "HOME", home))
-        stack.enter_context(patch.object(u, "UNIENV_HOME", root))
-        stack.enter_context(patch.object(u, "BIN", root / "bin"))
-        stack.enter_context(patch.object(u, "PY_DIR", root / "py"))
-        stack.enter_context(patch.object(u, "NODE_DIR", root / "node"))
-        stack.enter_context(patch.object(u, "STATE_FILE", root / "state.json"))
-        stack.enter_context(patch.object(u, "MANIFEST_FILE", root / "manifest.json"))
-        stack.enter_context(patch.object(u, "ENV_SH", root / "env.sh"))
-        stack.enter_context(patch.object(u, "AGENTS_COPY", root / "AGENTS.md"))
-        stack.enter_context(patch.object(u, "BACKUP_DIR", root / "backups"))
-        stack.enter_context(patch.object(u, "LOG_FILE", root / "log" / "unienv.log"))
-        stack.enter_context(patch.object(u, "SHELL_FILES", shell_files))
+        stack.enter_context(isolated_home(u, home, unienv_home=root, shell_files=shell_files))
         return root, shell_files
 
     def test_install_no_wire_persists_through_need_sync_and_doctor_fix(self):

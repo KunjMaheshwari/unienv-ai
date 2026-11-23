@@ -141,6 +141,19 @@ Open your AI tool **outside any project** and ask:
 
 It should use `ue-py`, `pdftotext` and `soffice-safe` directly, with no virtualenv and no installs.
 
+
+### Windows
+
+In PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/rupeshbharambe24/unienv-ai/main/install.ps1 | iex
+```
+
+System tools come from winget or Scoop (`.\install.ps1 --no-system` skips them). In WSL, use the Linux installer above.
+
+`install.ps1` copies UniEnv files into `%USERPROFILE%\.unienv\share` without requiring Developer Mode or symlink privileges (including `--dev` from a local checkout), and refuses to overwrite an existing symlinked/junctioned `share` directory so its target is never modified. Both `.cmd` wrappers and Git Bash shims target the Windows Python environment, and `unienv uninstall` removes only the user `PATH` entry added by the installer.
+
 ## 🔋 Batteries
 
 | Battery | Default | What agents get |
@@ -155,6 +168,8 @@ It should use `ue-py`, `pdftotext` and `soffice-safe` directly, with no virtuale
 | `latex` | opt-in | Tectonic (`tectonic paper.tex` compiles LaTeX to PDF and downloads TeX packages on demand) |
 | `ml` | opt-in | scikit-learn, scipy, xgboost, lightgbm, imbalanced-learn, joblib (`libomp` / `libgomp1`) |
 | `speech` | opt-in | faster-whisper (CTranslate2, no PyTorch) + ffmpeg for local audio/video transcription |
+| `diagrams` | opt-in | Graphviz (`dot`) + `@mermaid-js/mermaid-cli` (`mmdc`) for rendering `.dot` and `.mmd` diagrams |
+| `browser` | opt-in | Playwright + one shared headless Chromium in `~/.unienv/browsers` (`PLAYWRIGHT_BROWSERS_PATH`) |
 
 Each battery is a small, declarative [TOML recipe](recipes/office.toml). **Adding one is the easiest way to contribute**: LaTeX, browsers, diagrams, GIS, audio… see [CONTRIBUTING.md](CONTRIBUTING.md#writing-a-recipe).
 
@@ -246,7 +261,7 @@ It installs from the same public registries an agent would use anyway (PyPI, npm
 <details>
 <summary><b>Windows?</b></summary>
 
-Not yet: Windows (winget/Scoop) and WSL are planned for 1.0 ([#8](https://github.com/rupeshbharambe24/unienv-ai/issues/8)). Help is very welcome.
+Yes, new in the next release: native Windows with winget or Scoop, `.cmd` shims and `install.ps1` (see [Windows](#windows)). In WSL, use the Linux installer. Windows support is newer than macOS and Linux, so please [open an issue](https://github.com/rupeshbharambe24/unienv-ai/issues) if something doesn't work.
 </details>
 
 ## 🧪 Measured

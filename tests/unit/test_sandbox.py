@@ -9,8 +9,12 @@ import os
 import pathlib
 import tempfile
 import tomllib
+import sys
 import unittest
 from unittest.mock import patch
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _isolation import isolated_home  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("unienv", ROOT / "src" / "unienv.py")
@@ -90,13 +94,15 @@ class SandboxProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = pathlib.Path(tmp)
             with (
-                patch.object(u, "HOME", home),
-                patch.object(u, "UNIENV_HOME", home / "unienv"),
-                patch.object(u, "SHELL_FILES", []),
+                isolated_home(
+                    u,
+                    home,
+                    unienv_home=home / "unienv",
+                    shell_files=[],
+                    extra_env={"CODEX_HOME": str(home / "codex")},
+                ),
                 patch.object(u, "agent_targets", return_value=[]),
                 patch.object(u, "mcp_clients", return_value={}),
-                patch.object(u, "LAUNCH_AGENT", home / "absent.plist"),
-                patch.dict(os.environ, {"CODEX_HOME": str(home / "codex")}),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 self.assertEqual(u.cmd_sandbox(argparse.Namespace(action="install", tool="all")), 0)
@@ -173,11 +179,9 @@ class SandboxProfileTests(unittest.TestCase):
                 # Corrupt sandbox-settings.json: cmd_uninstall must warn and still finish
                 (root / "unienv/sandbox-settings.json").write_text("{corrupt", encoding="utf-8")
                 with (
-                    patch.object(u, "HOME", root),
-                    patch.object(u, "SHELL_FILES", []),
+                    isolated_home(u, root, unienv_home=root / "unienv", shell_files=[]),
                     patch.object(u, "agent_targets", return_value=[]),
                     patch.object(u, "mcp_clients", return_value={}),
-                    patch.object(u, "LAUNCH_AGENT", root / "absent.plist"),
                     contextlib.redirect_stdout(io.StringIO()),
                     contextlib.redirect_stderr(io.StringIO()) as err,
                 ):

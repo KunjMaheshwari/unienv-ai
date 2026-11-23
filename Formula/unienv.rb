@@ -1,9 +1,9 @@
 class Unienv < Formula
   desc "One always-ready environment shared by every AI tool"
   homepage "https://github.com/rupeshbharambe24/unienv-ai"
-  url "https://github.com/rupeshbharambe24/unienv-ai/archive/refs/tags/v0.2.2.tar.gz"
+  url "https://github.com/rupeshbharambe24/unienv-ai/releases/download/v0.3.0/unienv-ai-v0.3.0.tar.gz"
   sha256 "REPLACE_WITH_RELEASE_SHA256"
-  license "MIT"
+  license any_of: ["MIT", "Apache-2.0"]
 
   depends_on "uv"
 

@@ -49,12 +49,21 @@ LOG_FILE = UNIENV_HOME / "log" / "unienv.log"
 BACKUP_DIR = UNIENV_HOME / "backups"
 
 IS_MAC = sys.platform == "darwin"
+IS_WIN = sys.platform == "win32"
 EXTRA_DIRS = [
     "/opt/homebrew/bin",
     "/opt/homebrew/sbin",
     "/usr/local/bin",
     str(HOME / ".local/bin"),
     str(HOME / ".cargo/bin"),
+    *(
+        [
+            str(HOME / "scoop/shims"),
+            str(Path(os.environ.get("LOCALAPPDATA", HOME / "AppData/Local")) / "Microsoft/WinGet/Links"),
+        ]
+        if IS_WIN
+        else []
+    ),
 ]
 
 SHELL_BEGIN, SHELL_END = "# >>> unienv >>>", "# <<< unienv <<<"
@@ -114,10 +123,20 @@ def which(name: str) -> str | None:
 
 
 def libreoffice_path() -> str | None:
-    app = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
-    if IS_MAC and os.access(app, os.X_OK):
-        return app
+    if IS_MAC:
+        app = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+        if os.access(app, os.X_OK):
+            return app
+    if IS_WIN:
+        for base in (os.environ.get("ProgramFiles", r"C:\Program Files"), r"C:\Program Files (x86)"):
+            exe = Path(base) / "LibreOffice/program/soffice.exe"
+            if exe.exists():
+                return str(exe)
     return shutil.which("soffice", path=search_path()) or shutil.which("libreoffice", path=search_path())
+
+
+def venv_python() -> Path:
+    return PY_DIR / (".venv/Scripts/python.exe" if IS_WIN else ".venv/bin/python")
 
 
 def resolve_bin(name: str) -> str | None:
@@ -217,6 +236,8 @@ def _os_release_tokens(path: Path = Path("/etc/os-release")) -> set[str]:
 def platform_key() -> str:
     if IS_MAC:
         return "macos"
+    if IS_WIN:
+        return "windows"
     if Path("/etc/debian_version").exists():
         return "debian"
     distro_id, tokens = _os_release_info()
@@ -339,19 +360,38 @@ def atomic_write(path: Path, text: str) -> None:
 @contextlib.contextmanager
 def state_lock():
     """Serialise commands that change ~/.unienv: parallel agents often run `unienv need` at once."""
-    try:
-        import fcntl
-    except ImportError:  # no flock (Windows): run unlocked
-        yield
-        return
     UNIENV_HOME.mkdir(parents=True, exist_ok=True)
-    with open(UNIENV_HOME / ".lock", "w") as f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print("waiting for another unienv command to finish…", file=sys.stderr, flush=True)
-            fcntl.flock(f, fcntl.LOCK_EX)
-        yield  # released when the file is closed
+    # Keep the lock outside the install tree on Windows so `--purge` can remove UNIENV_HOME while locked.
+    lock_path = UNIENV_HOME.parent / ("." + UNIENV_HOME.name + ".lock") if IS_WIN else UNIENV_HOME / ".lock"
+    with open(lock_path, "a+b") as f:
+        if IS_WIN:
+            import msvcrt
+
+            f.seek(0, 2)
+            if not f.tell():
+                f.write(b"0")
+                f.flush()
+            while True:
+                f.seek(0)
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            try:
+                yield
+            finally:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("waiting for another unienv command to finish…", file=sys.stderr, flush=True)
+                fcntl.flock(f, fcntl.LOCK_EX)
+            yield
 
 
 def read_block(path: Path, begin: str, end: str) -> str | None:
@@ -408,6 +448,7 @@ def validate_recipe(r: dict, stem: str) -> list[str]:
     allowed_system = {
         "macos": {"brew", "cask"},
         "debian": {"apt"},
+        "windows": {"winget", "scoop"},
         "fedora": {"dnf"},
         "arch": {"pacman"},
     }
@@ -433,29 +474,39 @@ def default_state(recipes: dict) -> dict:
     return {
         "version": VERSION,
         "batteries": [k for k, r in recipes.items() if r.get("default") and not r.get("always")],
-        "extras": {"python": [], "node": [], "brew": [], "cask": [], "apt": [], "dnf": [], "pacman": []},
+        "extras": {k: [] for k in ("python", "node", "brew", "cask", "apt", "winget", "scoop", "dnf", "pacman")},
         "options": {"wire_homebrew": True, "wire_shells": True, "exclude": []},
+        "wired_shell_files": [],
     }
 
 
 def load_state(recipes: dict) -> dict:
     state = default_state(recipes)
-    if STATE_FILE.exists():
+    sf = STATE_FILE
+    if sf.exists():
         try:
-            saved = json.loads(STATE_FILE.read_text())
-        except json.JSONDecodeError:
+            saved = json.loads(sf.read_text())
+        except (json.JSONDecodeError, OSError):
             backups = sorted(BACKUP_DIR.glob("*/*__state.json"))
-            warn(f"{STATE_FILE} is corrupt; " + (f"using the backup {backups[-1]}" if backups else "using defaults"))
-            saved = json.loads(backups[-1].read_text()) if backups else {}
+            warn(f"{sf} is corrupt; " + (f"using the backup {backups[-1]}" if backups else "using defaults"))
+            try:
+                saved = json.loads(backups[-1].read_text()) if backups else {}
+            except (json.JSONDecodeError, OSError):
+                saved = {}
+        if not isinstance(saved, dict):
+            saved = {}
         state.update({k: v for k, v in saved.items() if k in state and k != "options"})
-        state["options"].update(saved.get("options", {}))
+        if isinstance(saved.get("options"), dict):
+            state["options"].update(saved.get("options", {}))
+        if not isinstance(state.get("wired_shell_files"), list):
+            state["wired_shell_files"] = []
         for k in default_state(recipes)["extras"]:
             state["extras"].setdefault(k, [])
     return state
 
 
 def save_state(state: dict) -> None:
-    UNIENV_HOME.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     state["version"] = VERSION
     atomic_write(STATE_FILE, json.dumps(state, indent=2) + "\n")
 
@@ -475,10 +526,14 @@ def wanted(recipes: list[dict], state: dict) -> dict[str, list[str]]:
     def system(kind: str) -> list[str]:
         pkgs = [p for r in recipes for p in r.get("system", {}).get(pk, {}).get(kind, [])]
         # "libreoffice" also excludes apt's "libreoffice-writer", "libreoffice-calc", ...
+        # and winget's "TheDocumentFoundation.LibreOffice" (case-insensitive tail/prefix match)
         return [
             p
             for p in uniq(pkgs + state.get("extras", {}).get(kind, []))
-            if not any(p == x or p.startswith(x + "-") for x in excluded)
+            if not any(
+                p.lower() == x.lower() or p.lower().startswith(x.lower() + "-") or p.lower().endswith("." + x.lower())
+                for x in excluded
+            )
         ]
 
     bins, skipped = [], []
@@ -494,6 +549,8 @@ def wanted(recipes: list[dict], state: dict) -> dict[str, list[str]]:
         "brew": system("brew"),
         "cask": system("cask"),
         "apt": system("apt"),
+        "winget": system("winget"),
+        "scoop": system("scoop"),
         "dnf": system("dnf"),
         "pacman": system("pacman"),
         "bins": uniq(bins),
@@ -509,6 +566,11 @@ def _apt_installed(pkg: str) -> bool:
     """
     r = run(["dpkg-query", "-W", "-f=${Status}", pkg], capture=True, check=False)
     return r.stdout.strip() == "install ok installed"
+
+
+def _winget_installed(winget: str, pkg: str) -> bool:
+    r = run([winget, "list", "--exact", "--id", pkg, "--accept-source-agreements"], capture=True, check=False)
+    return r.returncode == 0 and pkg.lower() in (r.stdout or "").lower()
 
 
 def _dnf_installed(pkg: str) -> bool:
@@ -575,6 +637,48 @@ def install_system(w: dict, *, assume_yes: bool) -> list[str]:
                 failures.extend(f"{kind}:{p}" for p in pkgs)
         else:
             info("  all system packages already installed")
+    elif pk == "windows":
+        scoop = which("scoop")
+        winget = which("winget")
+        if scoop and w.get("scoop"):
+            have_s = {
+                line.split()[0].lower()
+                for line in run([scoop, "list"], capture=True, check=False).stdout.splitlines()
+                if line.strip() and not line.strip().startswith(("Installed", "---"))
+            }
+            pkgs = [p for p in w["scoop"] if p.split("/")[-1].lower() not in have_s]
+            if "libreoffice" in pkgs:
+                buckets = run([scoop, "bucket", "list"], capture=True, check=False)
+                has_extras = any(line.split()[0] == "extras" for line in buckets.stdout.splitlines() if line.strip())
+                bucket_failed = not has_extras and run([scoop, "bucket", "add", "extras"], check=False).returncode
+                if bucket_failed:
+                    failures.append("scoop:extras")
+                    pkgs = [p for p in pkgs if p != "libreoffice"]
+            for p in pkgs:
+                if run([scoop, "install", p], check=False).returncode != 0:
+                    failures.append(f"scoop:{p}")
+            if not pkgs:
+                info("  all system packages already installed")
+        elif winget and w.get("winget"):
+            pkgs = [p for p in w["winget"] if not _winget_installed(winget, p)]
+            for p in pkgs:
+                cmd = [
+                    winget,
+                    "install",
+                    "--exact",
+                    "--id",
+                    p,
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ]
+                if run(cmd, check=False).returncode != 0:
+                    failures.append(f"winget:{p}")
+            if not pkgs:
+                info("  all system packages already installed")
+        elif w.get("winget") or w.get("scoop"):
+            warn("Neither winget nor Scoop found. Install Scoop (https://scoop.sh) or App Installer (winget).")
+            failures.extend(f"windows:{p}" for p in (w.get("winget") or w.get("scoop") or []))
     else:
         req = uniq(w.get("brew", []) + w.get("cask", []) + w.get("apt", []))
         if not req:
@@ -629,6 +733,47 @@ def install_python(packages: list[str]) -> None:
     )
 
 
+def install_browsers(*, assume_yes: bool = False, no_system: bool = False) -> None:
+    custom = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
+    if custom == "0":
+        browsers_env = "0"
+    elif custom:
+        p = Path(custom).expanduser()
+        if p.is_absolute():
+            p.mkdir(parents=True, exist_ok=True)
+        browsers_env = str(p)
+    else:
+        browsers_dir = UNIENV_HOME / "browsers"
+        browsers_dir.mkdir(parents=True, exist_ok=True)
+        browsers_env = str(browsers_dir)
+    py = PY_DIR / ".venv/bin/python"
+    if not py.exists():
+        return
+    r = run(
+        [str(py), "-P", "-m", "playwright", "install", "chromium"],
+        env={"PLAYWRIGHT_BROWSERS_PATH": browsers_env},
+        check=False,
+    )
+    if r.returncode != 0:
+        warn(
+            f"playwright browser download failed (exit {r.returncode}); "
+            f"run `PLAYWRIGHT_BROWSERS_PATH={browsers_env} ue-py -m playwright install chromium`"
+        )
+    if not no_system and platform_key() == "debian":
+        deps_cmd = [str(py), "-P", "-m", "playwright", "install-deps", "chromium"]
+        if assume_yes or os.geteuid() == 0:
+            cmd = deps_cmd if os.geteuid() == 0 else ["sudo", *deps_cmd]
+            if run(cmd, check=False).returncode != 0:
+                warn("playwright install-deps failed; run: " + " ".join(cmd))
+        else:
+            warned_marker = UNIENV_HOME / "browsers" / ".deps-hint-shown"
+            if not warned_marker.exists():
+                warn("Browser system libraries needed on Linux. Run:\n    sudo " + " ".join(deps_cmd))
+                with contextlib.suppress(OSError):
+                    warned_marker.parent.mkdir(parents=True, exist_ok=True)
+                    warned_marker.write_text("1\n")
+
+
 def write_package_json(packages: list[str]) -> None:
     NODE_DIR.mkdir(parents=True, exist_ok=True)
     pj = NODE_DIR / "package.json"
@@ -646,6 +791,17 @@ def write_package_json(packages: list[str]) -> None:
     pj.write_text(json.dumps(data, indent=2) + "\n")
 
 
+def _uses_puppeteer(packages: list[str]) -> bool:
+    return any(node_name(p) in ("@mermaid-js/mermaid-cli", "puppeteer", "puppeteer-core") for p in packages)
+
+
+def _puppeteer_cache_env(packages: list[str]) -> dict[str, str] | None:
+    if not _uses_puppeteer(packages):
+        return None
+    cache_dir = os.environ.get("PUPPETEER_CACHE_DIR") or str(UNIENV_HOME / "cache" / "puppeteer")
+    return {"PUPPETEER_CACHE_DIR": cache_dir}
+
+
 def install_node(packages: list[str], *, require_npm: bool = False) -> None:
     if not packages:
         return
@@ -659,6 +815,7 @@ def install_node(packages: list[str], *, require_npm: bool = False) -> None:
     run(
         [npm, "install", "--no-audit", "--no-fund", "--loglevel=error", "--progress=false", "--no-update-notifier"],
         cwd=NODE_DIR,
+        env=_puppeteer_cache_env(packages),
     )
 
 
@@ -720,7 +877,7 @@ def write_shims() -> None:
             continue
         text = tpl.read_text().replace("@UNIENV_HOME@", str(UNIENV_HOME)).replace("@NODE@", node)
         dst = BIN / tpl.name
-        dst.write_text(text)
+        dst.write_text(text, newline="")
         dst.chmod(0o755)
         current_shims.append(tpl.name)
 
@@ -754,13 +911,53 @@ def write_shims() -> None:
         'curl -fsSL https://raw.githubusercontent.com/rupeshbharambe24/unienv-ai/main/install.sh | bash" >&2\n'
         "  exit 1\n"
         "fi\n"
-        f'exec "$PY" "{script}" "$@"\n'
+        f'exec "$PY" "{script}" "$@"\n',
+        newline="",
     )
     cli.chmod(0o755)
     ue = BIN / "ue"
     if ue.is_symlink() or ue.exists():
         ue.unlink()
-    ue.symlink_to("unienv")
+    if IS_WIN:
+        py_exe = venv_python()
+        (BIN / "ue-py.cmd").write_text(f'@echo off\r\nset PYTHONUTF8=1\r\n"{py_exe}" %*\r\n', newline="")
+        (BIN / "ue-node.cmd").write_text(
+            f'''@echo off\r\nset "NODE_PATH={UNIENV_HOME / "node" / "node_modules"};%NODE_PATH%"\r\n"{node}" %*\r\n''',
+            newline="",
+        )
+        cli_cmd = (
+            "@echo off\r\n"
+            "set PYTHONUTF8=1\r\n"
+            f'if /i not "%~1"=="uninstall" "{sys.executable}" "{Path(__file__).resolve()}" %* & exit /b\r\n'
+            f'copy /y "{Path(__file__).resolve()}" "%TEMP%\\unienv-uninstall.py" >nul\r\n'
+            '> "%TEMP%\\unienv-uninstall.cmd" echo @echo off\r\n'
+            f'>> "%TEMP%\\unienv-uninstall.cmd" echo "{sys.executable}" "%%TEMP%%\\unienv-uninstall.py" %%*\r\n'
+            '>> "%TEMP%\\unienv-uninstall.cmd" echo set "RC=%%ERRORLEVEL%%"\r\n'
+            '>> "%TEMP%\\unienv-uninstall.cmd" echo del /f /q "%%TEMP%%\\unienv-uninstall.py" 2^>nul\r\n'
+            '>> "%TEMP%\\unienv-uninstall.cmd" echo (goto) 2^>nul ^& del /f /q "%%~f0" ^& cmd /c exit %%RC%%\r\n'
+            '"%TEMP%\\unienv-uninstall.cmd" %*\r\n'
+        )
+        (BIN / "unienv.cmd").write_text(cli_cmd, newline="")
+        (BIN / "ue.cmd").write_text(cli_cmd, newline="")
+        wrappers = {
+            "ue-py": [str(py_exe)],
+            "ue": [sys.executable, str(Path(__file__).resolve())],
+            "unienv": [sys.executable, str(Path(__file__).resolve())],
+            "soffice-safe": [sys.executable, str(Path(__file__).resolve()), "_soffice-safe"],
+        }
+        for name, argv in wrappers.items():
+            command = " ".join((shlex.quote(arg.replace("\\", "/")) for arg in argv))
+            (BIN / name).write_text(f'#!/bin/sh\nexport PYTHONUTF8=1\nexec {command} "$@"\n', newline="")
+        node_path = str(NODE_DIR / "node_modules").replace("\\", "/")
+        (BIN / "ue-node").write_text(
+            f'''#!/bin/sh\nexport NODE_PATH="{node_path};$NODE_PATH"\nexec "{node.replace(chr(92), "/")}" "$@"\n''',
+            newline="",
+        )
+        (BIN / "soffice-safe.cmd").write_text(
+            f'@echo off\r\n"{sys.executable}" "{Path(__file__).resolve()}" _soffice-safe %*\r\n', newline=""
+        )
+    else:
+        ue.symlink_to("unienv")
 
 
 def brew_prefix() -> str | None:
@@ -786,6 +983,16 @@ def write_env_sh(state: dict) -> None:
     lines += [
         'case ":$PATH:" in *":$UNIENV_HOME/bin:"*) ;; *) PATH="$UNIENV_HOME/bin:$PATH" ;; esac',
         "export PATH",
+    ]
+    if (
+        "diagrams" in state.get("batteries", [])
+        or _uses_puppeteer(state.get("extras", {}).get("node", []))
+        or (UNIENV_HOME / "cache" / "puppeteer").is_dir()
+    ):
+        lines.append('export PUPPETEER_CACHE_DIR="${PUPPETEER_CACHE_DIR:-$UNIENV_HOME/cache/puppeteer}"')
+    if "browser" in state.get("batteries", []):
+        lines.append('export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$UNIENV_HOME/browsers}"')
+    lines += [
         "# `bash -c` (non-login, non-interactive) reads only $BASH_ENV.",
         '[ -z "${BASH_ENV:-}" ] && export BASH_ENV="$UNIENV_HOME/env.sh"',
     ]
@@ -806,7 +1013,7 @@ def write_env_sh(state: dict) -> None:
 
 
 def python_packages() -> dict[str, str]:
-    py = PY_DIR / ".venv/bin/python"
+    py = venv_python()
     if not py.exists():
         return {}
     r = run(
@@ -845,12 +1052,12 @@ def write_manifest(recipes: list[dict], state: dict, w: dict) -> dict:
         "platform": f"{platform.system()} {platform.machine()}",
         "batteries": [r["id"] for r in recipes],
         "python": {
-            "command": str(BIN / "ue-py"),
-            "executable": str(PY_DIR / ".venv/bin/python"),
+            "command": str(BIN / ("ue-py.cmd" if IS_WIN else "ue-py")),
+            "executable": str(venv_python()),
             "version": PY_VERSION,
             "packages": top,
         },
-        "node": {"command": str(BIN / "ue-node"), "packages": node_packages(w["node"])},
+        "node": {"command": str(BIN / ("ue-node.cmd" if IS_WIN else "ue-node")), "packages": node_packages(w["node"])},
         "bins": {b: resolve_bin(b) for b in w["bins"]},
         "extras": state["extras"],
     }
@@ -997,10 +1204,46 @@ def sync_agents(manifest: dict, recipes: list[dict], *, only_detected: bool = Tr
     return done
 
 
-def wire_shells() -> list[str]:
+def _zdotdir() -> Path | None:
+    raw = os.environ.get("ZDOTDIR", "").strip()
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    try:
+        same = p.resolve() == HOME.resolve()
+    except OSError:
+        same = p == HOME
+    return None if same else p
+
+
+def _shell_files(state: dict | None = None) -> list[Path]:
+    if not SHELL_FILES:
+        return []
+    files = list(SHELL_FILES)
+    zdot = _zdotdir()
+    if zdot is not None:
+        zenv = zdot / ".zshenv"
+        if zenv not in files:
+            files.append(zenv)
+    if state is None:
+        state = load_state(load_recipes()) if STATE_FILE.exists() else {}
+    for raw in state.get("wired_shell_files", []):
+        if isinstance(raw, str) and Path(raw).is_absolute() and Path(raw) not in files and Path(raw).exists():
+            files.append(Path(raw))
+    return files
+
+
+def wire_shells(state: dict | None = None) -> list[str]:
+    if IS_WIN:
+        return []
+    own_state = state is None
+    if state is None:
+        state = load_state(load_recipes())
+    paths = state.setdefault("wired_shell_files", [])
+    before_paths = list(paths)
     body = f'[ -f "{ENV_SH}" ] && . "{ENV_SH}"'
     changed = []
-    for rc in SHELL_FILES:
+    for rc in _shell_files(state):
         # always wire zsh's .zshenv and the POSIX .profile; bash's own files only if they exist
         # (login bash reads .bash_profile or .bash_login *instead of* .profile when present)
         if rc.name not in (".zshenv", ".profile") and not rc.exists():
@@ -1008,8 +1251,14 @@ def wire_shells() -> list[str]:
         try:
             if upsert_block(rc, body, SHELL_BEGIN, SHELL_END):
                 changed.append(str(rc).replace(str(HOME), "~"))
+            if rc.name == ".zshenv" and rc.resolve().parent != HOME.resolve():
+                saved = str(rc.resolve())
+                if saved not in paths:
+                    paths.append(saved)
         except OSError as e:
             warn(f"could not update {rc} ({e}); add `source {ENV_SH}` yourself")
+    if own_state and paths != before_paths:
+        save_state(state)
     return changed
 
 
@@ -1028,8 +1277,11 @@ def do_sync(
     write_env_sh(state)
     manifest = write_manifest(recipes, state, w)
     agents = sync_agents(manifest, recipes, only_detected=not all_agents)
+    before_wired = list(state.get("wired_shell_files", []))
     should_wire = state.get("options", {}).get("wire_shells", True) if wire is None else wire
-    wired = wire_shells() if should_wire else []
+    wired = wire_shells(state) if should_wire else []
+    if state.get("wired_shell_files", []) != before_wired:
+        save_state(state)
     if not quiet:
         info(f"  shims: {', '.join(sorted(p.name for p in BIN.iterdir() if not p.name.startswith('.')))}")
         info(f"  agents configured: {', '.join(agents) or '(none detected)'}")
@@ -1078,7 +1330,7 @@ def pick_batteries(recipes_all: dict, current: list[str]) -> list[str]:
                 selected ^= {choices[int(tok) - 1]}
 
 
-def cmd_install(args) -> int:
+def cmd_install(args, *, run_doctor: bool = True) -> int:
     recipes_all = load_recipes()
     first_run = not STATE_FILE.exists()
     state = load_state(recipes_all)
@@ -1118,6 +1370,8 @@ def cmd_install(args) -> int:
         failures = install_system(w, assume_yes=args.yes)
     step(f"Python {PY_VERSION} environment ({len(w['python'])} packages)")
     install_python(w["python"])
+    if "browser" in state.get("batteries", []):
+        install_browsers(assume_yes=args.yes, no_system=args.no_system)
     step(f"Node packages ({len(w['node'])})")
     install_node(w["node"])
     step("Wiring shells and AI tools")
@@ -1125,6 +1379,8 @@ def cmd_install(args) -> int:
     log_event(event="install", batteries=[r["id"] for r in recipes], failures=failures)
     if failures:
         warn("Some system packages failed: " + ", ".join(failures))
+    if not run_doctor:
+        return 0
     step("Checking")
     rc = cmd_doctor(argparse.Namespace(json=False, fix=False, quiet_ok=True))
     info("\nOpen a new terminal (or restart your AI tools) so they pick up the new PATH.")
@@ -1285,9 +1541,11 @@ def cmd_need(args) -> int:
     recipes_all = load_recipes()
     state = load_state(recipes_all)
     kind = "node" if args.node else "brew" if args.bin else "cask" if args.cask else "python"
-    linux_mgr = {"debian": "apt", "fedora": "dnf", "arch": "pacman"}.get(platform_key())
-    if kind in ("brew", "cask") and linux_mgr:
-        kind = linux_mgr
+    if kind in ("brew", "cask"):
+        pk = platform_key()
+        kind = {"debian": "apt", "fedora": "dnf", "arch": "pacman"}.get(pk, kind)
+        if pk == "windows":
+            kind = "scoop" if which("scoop") else "winget"
     pkgs = args.packages
     recipes = active_recipes(recipes_all, state)
     w = wanted(recipes, state)
@@ -1356,6 +1614,8 @@ def cmd_need(args) -> int:
     try:
         if kind == "python":
             install_python(w["python"])
+            if "browser" in state.get("batteries", []):
+                install_browsers(assume_yes=args.yes, no_system=True)
         elif kind == "node":
             install_node(w["node"], require_npm=True)
         else:
@@ -1366,6 +1626,8 @@ def cmd_need(args) -> int:
                     "brew": new if kind == "brew" else [],
                     "cask": new if kind == "cask" else [],
                     "apt": new if kind == "apt" else [],
+                    "winget": new if kind == "winget" else [],
+                    "scoop": new if kind == "scoop" else [],
                     "dnf": new if kind == "dnf" else [],
                     "pacman": new if kind == "pacman" else [],
                 },
@@ -1533,7 +1795,7 @@ def _verify_python_imports(recipes: list[dict]) -> dict[str, str]:
     imports = uniq([m for r in recipes for m in r.get("python", {}).get("imports", [])])
     if not imports:
         return {}
-    py = PY_DIR / ".venv/bin/python"
+    py = venv_python()
     if not py.exists():
         return {"python": "shared Python env missing"}
     code = (
@@ -1610,6 +1872,8 @@ def cmd_upgrade(args) -> int:
                 uv_cmd.append("--upgrade")
             run(uv_cmd, env={"UV_PROJECT_ENVIRONMENT": str(PY_DIR / ".venv")})
             install_python(w["python"])
+            if "browser" in state.get("batteries", []):
+                install_browsers(assume_yes=False, no_system=True)
             bad_imports = _verify_python_imports(recipes)
             if bad_imports:
                 details = "; ".join(f"{m}: {err}" for m, err in bad_imports.items())
@@ -1636,6 +1900,7 @@ def cmd_upgrade(args) -> int:
                         *pkgs,
                     ],
                     cwd=NODE_DIR,
+                    env=_puppeteer_cache_env(w["node"]),
                 )
     except (subprocess.CalledProcessError, RuntimeError, SystemExit) as e:
         warn(f"upgrade failed ({e}); rolling back")
@@ -1702,6 +1967,208 @@ def cmd_list(args) -> int:
         for k, v in extras.items():
             info(f"  {k}: {', '.join(v)}")
     info("\nEnable an opt-in battery: unienv install --add media,fonts")
+    return 0
+
+
+def _toml_list(items: list[str]) -> str:
+    return "[" + ", ".join(json.dumps(str(x)) for x in items) + "]"
+
+
+def render_export_toml(state: dict) -> str:
+    batteries = list(state.get("batteries", []))
+    exclude = list(state.get("options", {}).get("exclude", []))
+    extras = state.get("extras", {})
+    lines = [
+        "# Exported by `unienv export`; restore with `unienv import <file>`.",
+        'schema = "unienv/env/v0"',
+        f"batteries = {_toml_list(batteries)}",
+        "",
+        "[options]",
+        f"exclude = {_toml_list(exclude)}",
+        "",
+        "[extras]",
+    ]
+    for kind in ("python", "node", "brew", "cask", "apt"):
+        lines.append(f"{kind} = {_toml_list(list(extras.get(kind, [])))}")
+
+    return "\n".join(lines) + "\n"
+
+
+def validate_env_spec(doc: dict, recipes_all: dict) -> list[str]:
+    problems = []
+    if doc.get("schema") != "unienv/env/v0":
+        problems.append('schema must be "unienv/env/v0"')
+    batteries = doc.get("batteries", [])
+    if not isinstance(batteries, list) or not all(isinstance(x, str) for x in batteries):
+        problems.append("batteries must be a list of strings")
+    else:
+        bad = [b for b in batteries if b not in recipes_all]
+        if bad:
+            problems.append(f"unknown batteries: {', '.join(bad)}")
+    options = doc.get("options", {})
+    if not isinstance(options, dict):
+        problems.append("[options] must be a table")
+    else:
+        exc = options.get("exclude", [])
+        if not isinstance(exc, list) or not all(isinstance(x, str) for x in exc):
+            problems.append("[options].exclude must be a list of strings")
+    extras = doc.get("extras", {})
+    if not isinstance(extras, dict):
+        problems.append("[extras] must be a table")
+    else:
+        for k, v in extras.items():
+            if k not in ("python", "node", "brew", "cask", "apt"):
+                problems.append(f"unknown [extras] key: {k}")
+            elif not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+                problems.append(f"[extras].{k} must be a list of strings")
+            else:
+                for package in v:
+                    if not _valid_import_package(k, package):
+                        problems.append(
+                            f"[extras].{k} contains an unsafe or unsupported package specification: {package!r}"
+                        )
+    return problems
+
+
+def cmd_export(args) -> int:
+    recipes_all = load_recipes()
+    state = load_state(recipes_all)
+    sys.stdout.write(render_export_toml(state))
+    return 0
+
+
+def _valid_import_package(kind: str, value: str) -> bool:
+    if kind == "python":
+        return bool(
+            re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:\[[A-Za-z0-9_,.-]+\])?(?:[<>=!~][A-Za-z0-9.*+!,<>=~_-]+)?", value
+            )
+        )
+    if kind == "node":
+        return bool(
+            re.fullmatch(r"(?:@[A-Za-z0-9_.-]+/)?[A-Za-z0-9][A-Za-z0-9_.-]*(?:@[A-Za-z0-9.^~*<>=|_-]+)?", value)
+        )
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+_.@-]*", value))
+
+
+def cmd_import(args) -> int:
+    recipes_all = load_recipes()
+    try:
+        raw = sys.stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8")
+        doc = tomllib.loads(raw)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        die(f"invalid environment file {args.file!r}: {exc}")
+    problems = validate_env_spec(doc, recipes_all)
+    if problems:
+        die(f"invalid environment file {args.file!r}: " + "; ".join(problems))
+    if "locks" in doc:
+        warn("Imported lock hashes are informational only and ignored; package resolution is platform-specific.")
+    previous = load_state(recipes_all)
+    state = json.loads(json.dumps(previous))
+    state["batteries"] = [b for b in uniq(doc.get("batteries", [])) if not recipes_all[b].get("always")]
+    state["options"]["exclude"] = uniq(doc.get("options", {}).get("exclude", []))
+    for kind in ("python", "node", "brew", "cask", "apt"):
+        state["extras"][kind] = uniq(doc.get("extras", {}).get(kind, []))
+    info("Import plan:")
+    info("  batteries: " + ", ".join(state["batteries"]))
+    if state["options"]["exclude"]:
+        info("  exclude: " + ", ".join(state["options"]["exclude"]))
+    for kind, packages in state["extras"].items():
+        if packages:
+            info(f"  {kind}: {', '.join(packages)}")
+        removed_extras = [p for p in previous.get("extras", {}).get(kind, []) if p not in packages]
+        if removed_extras:
+            info(f"  remove {kind}: {', '.join(removed_extras)}")
+    if not args.yes:
+        confirmed = False
+        if args.file == "-":
+            tty = _tty()
+            if tty is not None:
+                tin, tout = tty
+                try:
+                    tout.write("Apply this environment? [y/N] ")
+                    tout.flush()
+                    confirmed = tin.readline().strip().lower() in ("y", "yes")
+                finally:
+                    tin.close()
+                    tout.close()
+            else:
+                warn("cannot prompt for confirmation when reading from stdin without a TTY; pass -y/--yes")
+        else:
+            try:
+                confirmed = input("Apply this environment? [y/N] ").strip().lower() in ("y", "yes")
+            except EOFError:
+                confirmed = False
+        if not confirmed:
+            info("Import cancelled; no state changed.")
+            return 1
+    tracked = [
+        STATE_FILE,
+        PY_DIR / "pyproject.toml",
+        PY_DIR / "uv.lock",
+        PY_DIR / ".python-version",
+        NODE_DIR / "package.json",
+        NODE_DIR / "package-lock.json",
+    ]
+    saved = {path: path.read_bytes() if path.exists() else None for path in tracked}
+    dirs = {path: os.path.lexists(path) for path in (PY_DIR / ".venv", NODE_DIR / "node_modules")}
+
+    def restore_files():
+        for path, content in saved.items():
+            if content is None:
+                if path.exists():
+                    path.unlink()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+        for path, existed in dirs.items():
+            if not existed and os.path.lexists(path):
+                if path.is_symlink():
+                    path.unlink()
+                else:
+                    shutil.rmtree(path)
+
+    try:
+        save_state(state)
+        result = cmd_install(
+            argparse.Namespace(
+                batteries=None,
+                add=None,
+                exclude=None,
+                no_system=args.no_system,
+                no_wire=args.no_wire,
+                all_agents=False,
+                yes=args.yes,
+            ),
+            run_doctor=False,
+        )
+        if result:
+            raise RuntimeError(f"installation returned {result}")
+    except (Exception, SystemExit, KeyboardInterrupt) as exc:
+        warn(f"import failed ({exc}); rolling back")
+        restore_files()
+        try:
+            wanted_before = wanted(active_recipes(recipes_all, previous), previous)
+            try:
+                if saved[PY_DIR / "pyproject.toml"] is not None:
+                    install_python(wanted_before["python"])
+                if saved[NODE_DIR / "package.json"] is not None:
+                    install_node(wanted_before["node"], require_npm=True)
+            finally:
+                do_sync(previous, recipes_all, wire=not args.no_wire)
+        except (Exception, SystemExit, KeyboardInterrupt) as repair_error:
+            warn(f"rollback repair failed ({repair_error}); run unienv install to repair")
+        finally:
+            restore_files()
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        return 1
+    log_event(event="import", batteries=state["batteries"])
+    step("Checking")
+    doctor_rc = cmd_doctor(argparse.Namespace(json=False, fix=False, quiet_ok=True))
+    if doctor_rc:
+        warn("Imported environment, but `unienv doctor` reported issues (see above).")
+    info("Imported environment.")
     return 0
 
 
@@ -2128,7 +2595,7 @@ def cmd_update(args) -> int:
 # ── doctor ──────────────────────────────────────────────────────────────────
 
 
-def _clean_shell_probe(argv: list[str]) -> str | None:
+def _clean_shell_probe(argv: list[str], *, extra_env: dict[str, str] | None = None) -> str | None:
     """Run `command -v ue-py` in a shell started from a near-empty environment, like an agent or GUI app."""
     env = {
         "HOME": str(HOME),
@@ -2138,6 +2605,8 @@ def _clean_shell_probe(argv: list[str]) -> str | None:
     }
     if "UNIENV_HOME" in os.environ:
         env["UNIENV_HOME"] = os.environ["UNIENV_HOME"]
+    if extra_env:
+        env.update(extra_env)
     try:
         r = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -2163,7 +2632,7 @@ def cmd_doctor(args) -> int:
     add("prefix", "ok", str(UNIENV_HOME))
 
     # Python environment and imports
-    py = PY_DIR / ".venv/bin/python"
+    py = venv_python()
     imports = uniq([m for r in recipes for m in r.get("python", {}).get("imports", [])])
     if not py.exists() or not os.access(py, os.X_OK):
         dangling = py.is_symlink()
@@ -2240,14 +2709,17 @@ def cmd_doctor(args) -> int:
             )
     target = str(BIN / "ue-py")
     probes = [
-        ("zsh -c", ["/bin/zsh", "-c", "command -v ue-py"]),
-        ("zsh -lc", ["/bin/zsh", "-lc", "command -v ue-py"]),
-        ("bash -lc", ["/bin/bash", "-lc", "command -v ue-py"]),
+        ("zsh -c", ["/bin/zsh", "-c", "command -v ue-py"], None),
+        ("zsh -lc", ["/bin/zsh", "-lc", "command -v ue-py"], None),
+        ("bash -lc", ["/bin/bash", "-lc", "command -v ue-py"], None),
     ]
-    for label, argv in probes:
+    zdot = _zdotdir()
+    if zdot is not None:
+        probes.append(("ZDOTDIR zsh -c", ["/bin/zsh", "-c", "command -v ue-py"], {"ZDOTDIR": str(zdot)}))
+    for label, argv, extra_env in probes:
         if not Path(argv[0]).exists():
             continue
-        got = _clean_shell_probe(argv)
+        got = _clean_shell_probe(argv) if extra_env is None else _clean_shell_probe(argv, extra_env=extra_env)
         if got == target:
             add(f"shell:{label}", "ok", f"`{label}` finds ue-py")
         else:
@@ -2492,18 +2964,49 @@ def cmd_wire(args) -> int:
         run(["launchctl", "setenv", "PATH", path])
         info("✓ GUI PATH set (experimental). Quit and reopen desktop apps to pick it up.")
         return 0
-    changed = wire_shells()
     recipes_all = load_recipes()
     state = load_state(recipes_all)
+    changed = wire_shells(state)
     state["options"]["wire_shells"] = True
     save_state(state)
     info("✓ shell files updated: " + (", ".join(changed) if changed else "already wired"))
     return 0
 
 
+def _remove_windows_path() -> None:
+    marker = UNIENV_HOME / "windows-path.json"
+    if not IS_WIN or not marker.exists():
+        return
+    import winreg
+
+    owned = json.loads(marker.read_text(encoding="utf-8-sig"))["entry"]
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+        current, kind = winreg.QueryValueEx(key, "Path")
+        parts = current.split(";")
+        for i, part in enumerate(parts):
+            if os.path.normcase(part.rstrip("\\\\/")) == os.path.normcase(owned.rstrip("\\\\/")):
+                del parts[i]
+                break
+        winreg.SetValueEx(key, "Path", 0, kind, ";".join(parts))
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        ctypes.windll.user32.SendMessageTimeoutW(
+            0xFFFF,  # HWND_BROADCAST
+            0x001A,  # WM_SETTINGCHANGE
+            0,
+            "Environment",
+            0x0002,  # SMTO_ABORTIFHUNG
+            5000,
+            None,
+        )
+    marker.unlink()
+
+
 def cmd_uninstall(args) -> int:
     _uninstall_sandbox()
-    for rc in SHELL_FILES:
+    _remove_windows_path()
+    for rc in _shell_files():
         try:
             if remove_block(rc, SHELL_BEGIN, SHELL_END):
                 info(f"  removed block from {rc}")
@@ -2915,6 +3418,31 @@ def cmd_du(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "_soffice-safe":
+        import tempfile
+
+        soffice = os.environ.get("UNIENV_SOFFICE") or libreoffice_path()
+        if not soffice:
+            warn("LibreOffice is not installed")
+            return 127
+        with tempfile.TemporaryDirectory(prefix="ue_lo_") as profile:
+            return run(
+                [
+                    soffice,
+                    "-env:UserInstallation=" + Path(profile).as_uri(),
+                    "--headless",
+                    "--invisible",
+                    "--norestore",
+                    "--nologo",
+                    "--nodefault",
+                    "--nolockcheck",
+                    *argv[1:],
+                ],
+                check=False,
+                quiet=True,
+            ).returncode
     p = argparse.ArgumentParser(
         prog="unienv",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2939,7 +3467,9 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.add_argument("--no-system", action="store_true", help="skip Homebrew/apt packages")
     s.add_argument("--no-wire", action="store_true", help="don't edit shell startup files")
     s.add_argument("--all-agents", action="store_true", help="write instruction files even for agents not detected")
-    s.add_argument("-y", "--yes", action="store_true", help="allow sudo apt-get on Linux")
+    s.add_argument(
+        "-y", "--yes", action="store_true", help="skip battery picker and allow sudo apt-get/dnf/pacman on Linux"
+    )
     s.set_defaults(fn=cmd_install)
 
     s = sub.add_parser("need", help="permanently add a missing package for every AI tool")
@@ -2979,6 +3509,16 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s = sub.add_parser("list", help="show batteries, packages and tools")
     s.add_argument("--json", action="store_true", help="print manifest.json")
     s.set_defaults(fn=cmd_list)
+
+    s = sub.add_parser("export", help="export batteries, excludes and extras as portable TOML")
+    s.set_defaults(fn=cmd_export)
+
+    s = sub.add_parser("import", help="restore an environment exported with `unienv export`")
+    s.add_argument("file", help="path to exported TOML file (or '-' for stdin)")
+    s.add_argument("--no-system", action="store_true", help="skip Homebrew/apt packages")
+    s.add_argument("--no-wire", action="store_true", help="don't edit shell startup files")
+    s.add_argument("-y", "--yes", action="store_true", help="skip confirmation prompt and allow sudo apt-get on Linux")
+    s.set_defaults(fn=cmd_import)
 
     s = sub.add_parser("wire", help="(re)write shell startup blocks; --gui sets the macOS GUI PATH")
     s.add_argument("--gui", action="store_true", help="experimental: set launchd PATH for desktop apps")
@@ -3026,7 +3566,7 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
 
     args = p.parse_args(argv)
     mutating = (
-        args.cmd in ("install", "need", "remove", "sync", "uninstall", "wire")
+        args.cmd in ("install", "import", "need", "remove", "sync", "uninstall", "wire")
         or (args.cmd == "upgrade" and not args.dry_run)
         or (args.cmd == "doctor" and args.fix)
         or (args.cmd == "sandbox" and args.action == "install")
