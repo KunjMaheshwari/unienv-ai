@@ -141,6 +141,19 @@ Open your AI tool **outside any project** and ask:
 
 It should use `ue-py`, `pdftotext` and `soffice-safe` directly, with no virtualenv and no installs.
 
+
+### Windows
+
+In PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/rupeshbharambe24/unienv-ai/main/install.ps1 | iex
+```
+
+System tools come from winget or Scoop (`.\install.ps1 --no-system` skips them). In WSL, use the Linux installer above.
+
+`install.ps1` copies UniEnv files into `%USERPROFILE%\.unienv\share` without requiring Developer Mode or symlink privileges (including `--dev` from a local checkout), and refuses to overwrite an existing symlinked/junctioned `share` directory so its target is never modified. Both `.cmd` wrappers and Git Bash shims target the Windows Python environment, and `unienv uninstall` removes only the user `PATH` entry added by the installer.
+
 ## 🔋 Batteries
 
 | Battery | Default | What agents get |
@@ -152,6 +165,11 @@ It should use `ue-py`, `pdftotext` and `soffice-safe` directly, with no virtuale
 | `ocr` | ✅ | tesseract + pytesseract (English; `ue need --bin tesseract-lang` for more) |
 | `media` | opt-in | ffmpeg, ImageMagick |
 | `fonts` | opt-in | Carlito, Caladea, Liberation, Noto CJK (so LibreOffice renders match Word) |
+| `latex` | opt-in | Tectonic (`tectonic paper.tex` compiles LaTeX to PDF and downloads TeX packages on demand) |
+| `ml` | opt-in | scikit-learn, scipy, xgboost, lightgbm, imbalanced-learn, joblib (`libomp` / `libgomp1`) |
+| `speech` | opt-in | faster-whisper (CTranslate2, no PyTorch) + ffmpeg for local audio/video transcription |
+| `diagrams` | opt-in | Graphviz (`dot`) + `@mermaid-js/mermaid-cli` (`mmdc`) for rendering `.dot` and `.mmd` diagrams |
+| `browser` | opt-in | Playwright + one shared headless Chromium in `~/.unienv/browsers` (`PLAYWRIGHT_BROWSERS_PATH`) |
 
 Each battery is a small, declarative [TOML recipe](recipes/office.toml). **Adding one is the easiest way to contribute**: LaTeX, browsers, diagrams, GIS, audio… see [CONTRIBUTING.md](CONTRIBUTING.md#writing-a-recipe).
 
@@ -200,8 +218,10 @@ Details: [How it works](docs/how-it-works.md) · [AI tool integrations](docs/ai-
 | Gemini CLI | ✅ instructions + shell |
 | OpenCode | ✅ instructions + shell |
 | Windsurf | ✅ instructions (`~/.codeium/windsurf/memories/global_rules.md`) + shell |
+| Cline | ✅ global rules + shell |
+| Roo Code | ✅ global rules + shell |
 | Cursor | ◐ shell works, MCP via `unienv mcp install --client cursor`; paste `~/.unienv/AGENTS.md` into User Rules ([adapter wanted](https://github.com/rupeshbharambe24/unienv-ai/issues/4)) |
-| Cline, Roo, Copilot, Aider | ◐ shell works; paste `~/.unienv/AGENTS.md` into user rules. [Adapters wanted](https://github.com/rupeshbharambe24/unienv-ai/labels/adapter) |
+| Copilot, Aider | ◐ shell works; paste `~/.unienv/AGENTS.md` into user rules. [Adapters wanted](https://github.com/rupeshbharambe24/unienv-ai/labels/adapter) |
 | **Claude Desktop chat** | ✅ via the UniEnv MCP server: `unienv mcp install` or the one-click `.mcpb` extension ([guide](docs/mcp.md)) |
 | LM Studio & other MCP apps | ✅ via MCP: `unienv mcp config` prints the snippet |
 | Claude.ai / ChatGPT on the web, Cowork | ❌ they run in the cloud or a VM and can't reach your computer |
@@ -241,7 +261,7 @@ It installs from the same public registries an agent would use anyway (PyPI, npm
 <details>
 <summary><b>Windows?</b></summary>
 
-Not yet: Windows (winget/Scoop) and WSL are planned for 1.0 ([#8](https://github.com/rupeshbharambe24/unienv-ai/issues/8)). Help is very welcome.
+Yes, new in the next release: native Windows with winget or Scoop, `.cmd` shims and `install.ps1` (see [Windows](#windows)). In WSL, use the Linux installer. Windows support is newer than macOS and Linux, so please [open an issue](https://github.com/rupeshbharambe24/unienv-ai/issues) if something doesn't work.
 </details>
 
 ## 🧪 Measured
@@ -284,6 +304,7 @@ UniEnv is free and open source. If it saves you time, please **[give it a star o
 ### Contributors
 
 Thank you to everyone who has helped build UniEnv AI: [@bfs2021](https://github.com/bfs2021), [@SantanDon](https://github.com/SantanDon), [@CyberKun](https://github.com/CyberKun), [@sanjanamg0](https://github.com/sanjanamg0) and [@KunjMaheshwari](https://github.com/KunjMaheshwari). Want to see your name here? Pick an [issue](https://github.com/rupeshbharambe24/unienv-ai/labels/good%20first%20issue).
+
 
 ## License
 

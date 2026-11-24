@@ -19,14 +19,16 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 import tomllib
 from pathlib import Path
 
-VERSION = "0.2.2"
+VERSION = "0.3.0"
 PY_VERSION = "3.12"
 
 HOME = Path.home()
@@ -47,12 +49,21 @@ LOG_FILE = UNIENV_HOME / "log" / "unienv.log"
 BACKUP_DIR = UNIENV_HOME / "backups"
 
 IS_MAC = sys.platform == "darwin"
+IS_WIN = sys.platform == "win32"
 EXTRA_DIRS = [
     "/opt/homebrew/bin",
     "/opt/homebrew/sbin",
     "/usr/local/bin",
     str(HOME / ".local/bin"),
     str(HOME / ".cargo/bin"),
+    *(
+        [
+            str(HOME / "scoop/shims"),
+            str(Path(os.environ.get("LOCALAPPDATA", HOME / "AppData/Local")) / "Microsoft/WinGet/Links"),
+        ]
+        if IS_WIN
+        else []
+    ),
 ]
 
 SHELL_BEGIN, SHELL_END = "# >>> unienv >>>", "# <<< unienv <<<"
@@ -112,10 +123,20 @@ def which(name: str) -> str | None:
 
 
 def libreoffice_path() -> str | None:
-    app = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
-    if IS_MAC and os.access(app, os.X_OK):
-        return app
+    if IS_MAC:
+        app = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+        if os.access(app, os.X_OK):
+            return app
+    if IS_WIN:
+        for base in (os.environ.get("ProgramFiles", r"C:\Program Files"), r"C:\Program Files (x86)"):
+            exe = Path(base) / "LibreOffice/program/soffice.exe"
+            if exe.exists():
+                return str(exe)
     return shutil.which("soffice", path=search_path()) or shutil.which("libreoffice", path=search_path())
+
+
+def venv_python() -> Path:
+    return PY_DIR / (".venv/Scripts/python.exe" if IS_WIN else ".venv/bin/python")
 
 
 def resolve_bin(name: str) -> str | None:
@@ -186,11 +207,48 @@ def uniq(items) -> list:
     return out
 
 
+def _os_release_info(path: Path = Path("/etc/os-release")) -> tuple[str, set[str]]:
+    if not path.exists():
+        return "", set()
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return "", set()
+    distro_id = ""
+    tokens: set[str] = set()
+    for line in text.splitlines():
+        if "=" not in line or line.lstrip().startswith("#"):
+            continue
+        k, _, v = line.strip().partition("=")
+        vals = v.strip("\"'").lower().split()
+        if k == "ID" and vals:
+            distro_id = vals[0]
+            tokens.add(distro_id)
+        elif k == "ID_LIKE":
+            tokens.update(vals)
+    return distro_id, tokens
+
+
+def _os_release_tokens(path: Path = Path("/etc/os-release")) -> set[str]:
+    return _os_release_info(path)[1]
+
+
 def platform_key() -> str:
     if IS_MAC:
         return "macos"
+    if IS_WIN:
+        return "windows"
     if Path("/etc/debian_version").exists():
         return "debian"
+    distro_id, tokens = _os_release_info()
+    if tokens & {"debian", "ubuntu"}:
+        return "debian"
+    if distro_id == "fedora" or Path("/etc/fedora-release").exists():
+        return "fedora"
+    if tokens & {"arch", "manjaro", "endeavouros"} or Path("/etc/arch-release").exists():
+        return "arch"
+    if which("pacman"):
+        return "arch"
     return sys.platform
 
 
@@ -219,17 +277,46 @@ def _write_block_text(path: Path, text: str, eol: str) -> None:
         f.write(text.replace("\n", eol))
 
 
+def _block_layout_marker(begin: str) -> str:
+    return "# unienv:restore-no-final-newline" if begin.startswith("#") else "<!-- unienv:restore-no-final-newline -->"
+
+
+def _has_malformed_block(text: str, begin: str, end: str) -> bool:
+    """True when begin/end markers are unbalanced or orphaned."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    in_block = False
+    for line in normalized.splitlines():
+        if line.strip() == begin:
+            if in_block:
+                return True
+            in_block = True
+        elif line.strip() == end:
+            if not in_block:
+                return True
+            in_block = False
+    return in_block
+
+
 def upsert_block(path: Path, body: str, begin: str, end: str, *, top: bool = False) -> bool:
-    """Insert or replace a marked block. Returns True if the file changed."""
+    """Insert or replace a block without losing the surrounding file's layout."""
     old, eol = _read_block_text(path) if path.exists() else ("", os.linesep)
-    block = f"{begin}\n{body.rstrip()}\n{end}\n"
-    pattern = re.compile(re.escape(begin) + r".*?" + re.escape(end) + r"\n?", re.S)
-    if pattern.search(old):
+    if _has_malformed_block(old, begin, end):
+        warn(
+            f"{path} has an incomplete UniEnv block (missing end marker); fix or remove the orphaned marker line first"
+        )
+        return False
+    pattern = re.compile(re.escape(begin) + r"\n.*?" + re.escape(end) + r"(?:\n|$)", re.S)
+    match = pattern.search(old)
+    marker = _block_layout_marker(begin)
+    restore_eof = marker in match.group(0).splitlines() if match else bool(old and not top and not old.endswith("\n"))
+    prefix = marker + "\n" if restore_eof else ""
+    block = f"{begin}\n{prefix}{body.rstrip()}\n{end}\n"
+    if match:
         new = pattern.sub(lambda _: block, old, count=1)
     elif top:
-        new = block + ("\n" + old if old else "")
+        new = block + old
     else:
-        new = old + ("\n" if old and not old.endswith("\n") else "") + ("\n" if old else "") + block
+        new = old + ("\n" if restore_eof else "") + block
     if new == old:
         return False
     _write_block_text(path, new, eol)
@@ -240,8 +327,23 @@ def remove_block(path: Path, begin: str, end: str) -> bool:
     if not path.exists():
         return False
     old, eol = _read_block_text(path)
-    new = re.sub(r"\n?" + re.escape(begin) + r".*?" + re.escape(end) + r"\n?", "\n", old, flags=re.S)
-    new = new.strip("\n") + ("\n" if new.strip() else "")
+    if _has_malformed_block(old, begin, end):
+        warn(
+            f"{path} has an incomplete UniEnv block (missing end marker); fix or remove the orphaned marker line first"
+        )
+        return False
+    pattern = re.compile(re.escape(begin) + r"\n.*?" + re.escape(end) + r"(?:\n|$)", re.S)
+    new = old
+    for match in reversed(list(pattern.finditer(old))):
+        start = match.start()
+        if (
+            _block_layout_marker(begin) in match.group(0).splitlines()
+            and match.end() == len(old)
+            and start
+            and old[start - 1] == "\n"
+        ):
+            start -= 1
+        new = new[:start] + new[match.end() :]
     if new == old:
         return False
     _write_block_text(path, new, eol)
@@ -258,19 +360,38 @@ def atomic_write(path: Path, text: str) -> None:
 @contextlib.contextmanager
 def state_lock():
     """Serialise commands that change ~/.unienv: parallel agents often run `unienv need` at once."""
-    try:
-        import fcntl
-    except ImportError:  # no flock (Windows): run unlocked
-        yield
-        return
     UNIENV_HOME.mkdir(parents=True, exist_ok=True)
-    with open(UNIENV_HOME / ".lock", "w") as f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print("waiting for another unienv command to finish…", file=sys.stderr, flush=True)
-            fcntl.flock(f, fcntl.LOCK_EX)
-        yield  # released when the file is closed
+    # Keep the lock outside the install tree on Windows so `--purge` can remove UNIENV_HOME while locked.
+    lock_path = UNIENV_HOME.parent / ("." + UNIENV_HOME.name + ".lock") if IS_WIN else UNIENV_HOME / ".lock"
+    with open(lock_path, "a+b") as f:
+        if IS_WIN:
+            import msvcrt
+
+            f.seek(0, 2)
+            if not f.tell():
+                f.write(b"0")
+                f.flush()
+            while True:
+                f.seek(0)
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            try:
+                yield
+            finally:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("waiting for another unienv command to finish…", file=sys.stderr, flush=True)
+                fcntl.flock(f, fcntl.LOCK_EX)
+            yield
 
 
 def read_block(path: Path, begin: str, end: str) -> str | None:
@@ -280,8 +401,14 @@ def read_block(path: Path, begin: str, end: str) -> str | None:
         text = path.read_text(encoding="utf-8", errors="surrogateescape")
     except OSError:
         return None
+    if _has_malformed_block(text, begin, end):
+        return None
     m = re.search(re.escape(begin) + r"\n(.*?)\n" + re.escape(end), text, re.S)
-    return m.group(1) if m else None
+    if not m:
+        return None
+    body = m.group(1)
+    prefix = _block_layout_marker(begin) + "\n"
+    return body[len(prefix) :] if body.startswith(prefix) else body
 
 
 # ── recipes & state ─────────────────────────────────────────────────────────
@@ -317,6 +444,29 @@ def validate_recipe(r: dict, stem: str) -> list[str]:
         v = r.get(section, {}).get(key, [])
         if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
             problems.append(f"[{section}].{key} must be a list of strings")
+    sys_sec = r.get("system", {})
+    allowed_system = {
+        "macos": {"brew", "cask"},
+        "debian": {"apt"},
+        "windows": {"winget", "scoop"},
+        "fedora": {"dnf"},
+        "arch": {"pacman"},
+    }
+    if not isinstance(sys_sec, dict):
+        problems.append("[system] must be a table")
+    else:
+        for pk, pval in sys_sec.items():
+            if pk not in allowed_system:
+                problems.append(f"unknown [system.{pk}] platform")
+                continue
+            if not isinstance(pval, dict):
+                problems.append(f"[system.{pk}] must be a table")
+                continue
+            for mgr, pkgs in pval.items():
+                if mgr not in allowed_system[pk]:
+                    problems.append(f"unknown [system.{pk}].{mgr} key")
+                elif not isinstance(pkgs, list) or not all(isinstance(x, str) for x in pkgs):
+                    problems.append(f"[system.{pk}].{mgr} must be a list of strings")
     return problems
 
 
@@ -324,29 +474,39 @@ def default_state(recipes: dict) -> dict:
     return {
         "version": VERSION,
         "batteries": [k for k, r in recipes.items() if r.get("default") and not r.get("always")],
-        "extras": {"python": [], "node": [], "brew": [], "cask": [], "apt": []},
-        "options": {"wire_homebrew": True, "exclude": []},
+        "extras": {k: [] for k in ("python", "node", "brew", "cask", "apt", "winget", "scoop", "dnf", "pacman")},
+        "options": {"wire_homebrew": True, "wire_shells": True, "exclude": []},
+        "wired_shell_files": [],
     }
 
 
 def load_state(recipes: dict) -> dict:
     state = default_state(recipes)
-    if STATE_FILE.exists():
+    sf = STATE_FILE
+    if sf.exists():
         try:
-            saved = json.loads(STATE_FILE.read_text())
-        except json.JSONDecodeError:
+            saved = json.loads(sf.read_text())
+        except (json.JSONDecodeError, OSError):
             backups = sorted(BACKUP_DIR.glob("*/*__state.json"))
-            warn(f"{STATE_FILE} is corrupt; " + (f"using the backup {backups[-1]}" if backups else "using defaults"))
-            saved = json.loads(backups[-1].read_text()) if backups else {}
+            warn(f"{sf} is corrupt; " + (f"using the backup {backups[-1]}" if backups else "using defaults"))
+            try:
+                saved = json.loads(backups[-1].read_text()) if backups else {}
+            except (json.JSONDecodeError, OSError):
+                saved = {}
+        if not isinstance(saved, dict):
+            saved = {}
         state.update({k: v for k, v in saved.items() if k in state and k != "options"})
-        state["options"].update(saved.get("options", {}))
+        if isinstance(saved.get("options"), dict):
+            state["options"].update(saved.get("options", {}))
+        if not isinstance(state.get("wired_shell_files"), list):
+            state["wired_shell_files"] = []
         for k in default_state(recipes)["extras"]:
             state["extras"].setdefault(k, [])
     return state
 
 
 def save_state(state: dict) -> None:
-    UNIENV_HOME.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     state["version"] = VERSION
     atomic_write(STATE_FILE, json.dumps(state, indent=2) + "\n")
 
@@ -366,8 +526,14 @@ def wanted(recipes: list[dict], state: dict) -> dict[str, list[str]]:
     def system(kind: str) -> list[str]:
         pkgs = [p for r in recipes for p in r.get("system", {}).get(pk, {}).get(kind, [])]
         # "libreoffice" also excludes apt's "libreoffice-writer", "libreoffice-calc", ...
+        # and winget's "TheDocumentFoundation.LibreOffice" (case-insensitive tail/prefix match)
         return [
-            p for p in uniq(pkgs + state["extras"][kind]) if not any(p == x or p.startswith(x + "-") for x in excluded)
+            p
+            for p in uniq(pkgs + state.get("extras", {}).get(kind, []))
+            if not any(
+                p.lower() == x.lower() or p.lower().startswith(x.lower() + "-") or p.lower().endswith("." + x.lower())
+                for x in excluded
+            )
         ]
 
     bins, skipped = [], []
@@ -383,6 +549,10 @@ def wanted(recipes: list[dict], state: dict) -> dict[str, list[str]]:
         "brew": system("brew"),
         "cask": system("cask"),
         "apt": system("apt"),
+        "winget": system("winget"),
+        "scoop": system("scoop"),
+        "dnf": system("dnf"),
+        "pacman": system("pacman"),
         "bins": uniq(bins),
         "skipped_bins": uniq(skipped),
     }
@@ -396,6 +566,19 @@ def _apt_installed(pkg: str) -> bool:
     """
     r = run(["dpkg-query", "-W", "-f=${Status}", pkg], capture=True, check=False)
     return r.stdout.strip() == "install ok installed"
+
+
+def _winget_installed(winget: str, pkg: str) -> bool:
+    r = run([winget, "list", "--exact", "--id", pkg, "--accept-source-agreements"], capture=True, check=False)
+    return r.returncode == 0 and pkg.lower() in (r.stdout or "").lower()
+
+
+def _dnf_installed(pkg: str) -> bool:
+    return run(["rpm", "-q", "--whatprovides", pkg], capture=True, check=False).returncode == 0
+
+
+def _pacman_installed(pkg: str) -> bool:
+    return run(["pacman", "-Qi", pkg], capture=True, check=False).returncode == 0
 
 
 # ── installers ──────────────────────────────────────────────────────────────
@@ -428,20 +611,84 @@ def install_system(w: dict, *, assume_yes: bool) -> list[str]:
                 failures.append(f"cask:{c}")
         if not formulas and not casks:
             info("  all system packages already installed")
-    elif pk == "debian":
-        pkgs = [p for p in w["apt"] if not _apt_installed(p)]
+    elif pk in ("debian", "fedora", "arch"):
+        mgr_cfg = {
+            "debian": ("apt", _apt_installed, ["sudo", "apt-get", "install", "-y"]),
+            "fedora": ("dnf", _dnf_installed, ["sudo", "dnf", "install", "-y"]),
+            "arch": ("pacman", _pacman_installed, ["sudo", "pacman", "-S", "--noconfirm", "--needed"]),
+        }
+        kind, is_installed, base_cmd = mgr_cfg[pk]
+        pkgs = [p for p in w.get(kind, []) if not is_installed(p)]
         if pkgs:
-            cmd = ["sudo", "apt-get", "install", "-y", *pkgs]
+            cmd = [*base_cmd, *pkgs]
             if assume_yes or os.geteuid() == 0:
                 if os.geteuid() == 0:
                     cmd = cmd[1:]
                 if run(cmd, check=False).returncode != 0:
-                    failures.extend(f"apt:{p}" for p in pkgs)
+                    if pk == "fedora":
+                        prefix = cmd[: -len(pkgs)]
+                        for package in pkgs:
+                            if run([*prefix, package], check=False).returncode != 0:
+                                failures.append(f"{kind}:{package}")
+                    else:
+                        failures.extend(f"{kind}:{p}" for p in pkgs)
             else:
                 warn("System packages needed. Run this, then `unienv install` again:\n    " + " ".join(cmd))
-                failures.extend(f"apt:{p}" for p in pkgs)
+                failures.extend(f"{kind}:{p}" for p in pkgs)
+        else:
+            info("  all system packages already installed")
+    elif pk == "windows":
+        scoop = which("scoop")
+        winget = which("winget")
+        if scoop and w.get("scoop"):
+            have_s = {
+                line.split()[0].lower()
+                for line in run([scoop, "list"], capture=True, check=False).stdout.splitlines()
+                if line.strip() and not line.strip().startswith(("Installed", "---"))
+            }
+            pkgs = [p for p in w["scoop"] if p.split("/")[-1].lower() not in have_s]
+            if "libreoffice" in pkgs:
+                buckets = run([scoop, "bucket", "list"], capture=True, check=False)
+                has_extras = any(line.split()[0] == "extras" for line in buckets.stdout.splitlines() if line.strip())
+                bucket_failed = not has_extras and run([scoop, "bucket", "add", "extras"], check=False).returncode
+                if bucket_failed:
+                    failures.append("scoop:extras")
+                    pkgs = [p for p in pkgs if p != "libreoffice"]
+            for p in pkgs:
+                if run([scoop, "install", p], check=False).returncode != 0:
+                    failures.append(f"scoop:{p}")
+            if not pkgs:
+                info("  all system packages already installed")
+        elif winget and w.get("winget"):
+            pkgs = [p for p in w["winget"] if not _winget_installed(winget, p)]
+            for p in pkgs:
+                cmd = [
+                    winget,
+                    "install",
+                    "--exact",
+                    "--id",
+                    p,
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ]
+                if run(cmd, check=False).returncode != 0:
+                    failures.append(f"winget:{p}")
+            if not pkgs:
+                info("  all system packages already installed")
+        elif w.get("winget") or w.get("scoop"):
+            warn("Neither winget nor Scoop found. Install Scoop (https://scoop.sh) or App Installer (winget).")
+            failures.extend(f"windows:{p}" for p in (w.get("winget") or w.get("scoop") or []))
     else:
-        warn(f"No system package backend for {pk} yet; install these yourself: {', '.join(w['bins'])}")
+        req = uniq(w.get("brew", []) + w.get("cask", []) + w.get("apt", []))
+        if not req:
+            return []
+        hint = " ".join(req) if req else "<packages>"
+        warn(
+            f"No system package backend for {pk} yet; install these yourself "
+            f"(e.g. `sudo dnf install {hint}` or `sudo pacman -S {hint}`): {', '.join(req)}"
+        )
+        return [f"{pk}:{b}" for b in req]
     return failures
 
 
@@ -486,6 +733,47 @@ def install_python(packages: list[str]) -> None:
     )
 
 
+def install_browsers(*, assume_yes: bool = False, no_system: bool = False) -> None:
+    custom = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
+    if custom == "0":
+        browsers_env = "0"
+    elif custom:
+        p = Path(custom).expanduser()
+        if p.is_absolute():
+            p.mkdir(parents=True, exist_ok=True)
+        browsers_env = str(p)
+    else:
+        browsers_dir = UNIENV_HOME / "browsers"
+        browsers_dir.mkdir(parents=True, exist_ok=True)
+        browsers_env = str(browsers_dir)
+    py = PY_DIR / ".venv/bin/python"
+    if not py.exists():
+        return
+    r = run(
+        [str(py), "-P", "-m", "playwright", "install", "chromium"],
+        env={"PLAYWRIGHT_BROWSERS_PATH": browsers_env},
+        check=False,
+    )
+    if r.returncode != 0:
+        warn(
+            f"playwright browser download failed (exit {r.returncode}); "
+            f"run `PLAYWRIGHT_BROWSERS_PATH={browsers_env} ue-py -m playwright install chromium`"
+        )
+    if not no_system and platform_key() == "debian":
+        deps_cmd = [str(py), "-P", "-m", "playwright", "install-deps", "chromium"]
+        if assume_yes or os.geteuid() == 0:
+            cmd = deps_cmd if os.geteuid() == 0 else ["sudo", *deps_cmd]
+            if run(cmd, check=False).returncode != 0:
+                warn("playwright install-deps failed; run: " + " ".join(cmd))
+        else:
+            warned_marker = UNIENV_HOME / "browsers" / ".deps-hint-shown"
+            if not warned_marker.exists():
+                warn("Browser system libraries needed on Linux. Run:\n    sudo " + " ".join(deps_cmd))
+                with contextlib.suppress(OSError):
+                    warned_marker.parent.mkdir(parents=True, exist_ok=True)
+                    warned_marker.write_text("1\n")
+
+
 def write_package_json(packages: list[str]) -> None:
     NODE_DIR.mkdir(parents=True, exist_ok=True)
     pj = NODE_DIR / "package.json"
@@ -503,6 +791,17 @@ def write_package_json(packages: list[str]) -> None:
     pj.write_text(json.dumps(data, indent=2) + "\n")
 
 
+def _uses_puppeteer(packages: list[str]) -> bool:
+    return any(node_name(p) in ("@mermaid-js/mermaid-cli", "puppeteer", "puppeteer-core") for p in packages)
+
+
+def _puppeteer_cache_env(packages: list[str]) -> dict[str, str] | None:
+    if not _uses_puppeteer(packages):
+        return None
+    cache_dir = os.environ.get("PUPPETEER_CACHE_DIR") or str(UNIENV_HOME / "cache" / "puppeteer")
+    return {"PUPPETEER_CACHE_DIR": cache_dir}
+
+
 def install_node(packages: list[str], *, require_npm: bool = False) -> None:
     if not packages:
         return
@@ -516,6 +815,7 @@ def install_node(packages: list[str], *, require_npm: bool = False) -> None:
     run(
         [npm, "install", "--no-audit", "--no-fund", "--loglevel=error", "--progress=false", "--no-update-notifier"],
         cwd=NODE_DIR,
+        env=_puppeteer_cache_env(packages),
     )
 
 
@@ -570,7 +870,7 @@ def write_shims() -> None:
             continue
         text = tpl.read_text().replace("@UNIENV_HOME@", str(UNIENV_HOME)).replace("@NODE@", node)
         dst = BIN / tpl.name
-        dst.write_text(text)
+        dst.write_text(text, newline="")
         dst.chmod(0o755)
         current_shims.append(tpl.name)
 
@@ -584,14 +884,73 @@ def write_shims() -> None:
     atomic_write(tracker, "\n".join(current_shims) + ("\n" if current_shims else ""))
 
     # the CLI itself: always run with the interpreter that is running us now
-    # (a uv-managed 3.12, never Homebrew's python), so it survives env breakage
+    # (a uv-managed 3.12, never Homebrew's python), falling back to uv python find
     cli = BIN / "unienv"
-    cli.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{Path(__file__).resolve()}" "$@"\n')
+    script = Path(__file__).resolve()
+    cli.write_text(
+        "#!/bin/sh\n"
+        f"PY={shlex.quote(sys.executable)}\n"
+        f"UV={shlex.quote(which('uv') or '')}\n"
+        'if [ ! -x "$PY" ]; then\n'
+        '  if [ -z "$UV" ] || [ ! -x "$UV" ]; then\n'
+        '    UV="$(command -v uv 2>/dev/null || true)"\n'
+        "  fi\n"
+        '  if [ -n "$UV" ] && [ -x "$UV" ]; then\n'
+        f'    PY="$("$UV" python find {PY_VERSION} --managed-python 2>/dev/null || true)"\n'
+        "  fi\n"
+        "fi\n"
+        'if [ -z "$PY" ] || [ ! -x "$PY" ]; then\n'
+        "  echo \"UniEnv's Python 3.12 interpreter is missing. Repair with: "
+        'curl -fsSL https://raw.githubusercontent.com/rupeshbharambe24/unienv-ai/main/install.sh | bash" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        f'exec "$PY" "{script}" "$@"\n',
+        newline="",
+    )
     cli.chmod(0o755)
     ue = BIN / "ue"
     if ue.is_symlink() or ue.exists():
         ue.unlink()
-    ue.symlink_to("unienv")
+    if IS_WIN:
+        py_exe = venv_python()
+        (BIN / "ue-py.cmd").write_text(f'@echo off\r\nset PYTHONUTF8=1\r\n"{py_exe}" %*\r\n', newline="")
+        (BIN / "ue-node.cmd").write_text(
+            f'''@echo off\r\nset "NODE_PATH={UNIENV_HOME / "node" / "node_modules"};%NODE_PATH%"\r\n"{node}" %*\r\n''',
+            newline="",
+        )
+        cli_cmd = (
+            "@echo off\r\n"
+            "set PYTHONUTF8=1\r\n"
+            f'if /i not "%~1"=="uninstall" "{sys.executable}" "{Path(__file__).resolve()}" %* & exit /b\r\n'
+            f'copy /y "{Path(__file__).resolve()}" "%TEMP%\\unienv-uninstall.py" >nul\r\n'
+            '> "%TEMP%\\unienv-uninstall.cmd" echo @echo off\r\n'
+            f'>> "%TEMP%\\unienv-uninstall.cmd" echo "{sys.executable}" "%%TEMP%%\\unienv-uninstall.py" %%*\r\n'
+            '>> "%TEMP%\\unienv-uninstall.cmd" echo set "RC=%%ERRORLEVEL%%"\r\n'
+            '>> "%TEMP%\\unienv-uninstall.cmd" echo del /f /q "%%TEMP%%\\unienv-uninstall.py" 2^>nul\r\n'
+            '>> "%TEMP%\\unienv-uninstall.cmd" echo (goto) 2^>nul ^& del /f /q "%%~f0" ^& cmd /c exit %%RC%%\r\n'
+            '"%TEMP%\\unienv-uninstall.cmd" %*\r\n'
+        )
+        (BIN / "unienv.cmd").write_text(cli_cmd, newline="")
+        (BIN / "ue.cmd").write_text(cli_cmd, newline="")
+        wrappers = {
+            "ue-py": [str(py_exe)],
+            "ue": [sys.executable, str(Path(__file__).resolve())],
+            "unienv": [sys.executable, str(Path(__file__).resolve())],
+            "soffice-safe": [sys.executable, str(Path(__file__).resolve()), "_soffice-safe"],
+        }
+        for name, argv in wrappers.items():
+            command = " ".join((shlex.quote(arg.replace("\\", "/")) for arg in argv))
+            (BIN / name).write_text(f'#!/bin/sh\nexport PYTHONUTF8=1\nexec {command} "$@"\n', newline="")
+        node_path = str(NODE_DIR / "node_modules").replace("\\", "/")
+        (BIN / "ue-node").write_text(
+            f'''#!/bin/sh\nexport NODE_PATH="{node_path};$NODE_PATH"\nexec "{node.replace(chr(92), "/")}" "$@"\n''',
+            newline="",
+        )
+        (BIN / "soffice-safe.cmd").write_text(
+            f'@echo off\r\n"{sys.executable}" "{Path(__file__).resolve()}" _soffice-safe %*\r\n', newline=""
+        )
+    else:
+        ue.symlink_to("unienv")
 
 
 def brew_prefix() -> str | None:
@@ -617,6 +976,16 @@ def write_env_sh(state: dict) -> None:
     lines += [
         'case ":$PATH:" in *":$UNIENV_HOME/bin:"*) ;; *) PATH="$UNIENV_HOME/bin:$PATH" ;; esac',
         "export PATH",
+    ]
+    if (
+        "diagrams" in state.get("batteries", [])
+        or _uses_puppeteer(state.get("extras", {}).get("node", []))
+        or (UNIENV_HOME / "cache" / "puppeteer").is_dir()
+    ):
+        lines.append('export PUPPETEER_CACHE_DIR="${PUPPETEER_CACHE_DIR:-$UNIENV_HOME/cache/puppeteer}"')
+    if "browser" in state.get("batteries", []):
+        lines.append('export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$UNIENV_HOME/browsers}"')
+    lines += [
         "# `bash -c` (non-login, non-interactive) reads only $BASH_ENV.",
         '[ -z "${BASH_ENV:-}" ] && export BASH_ENV="$UNIENV_HOME/env.sh"',
     ]
@@ -637,7 +1006,7 @@ def write_env_sh(state: dict) -> None:
 
 
 def python_packages() -> dict[str, str]:
-    py = PY_DIR / ".venv/bin/python"
+    py = venv_python()
     if not py.exists():
         return {}
     r = run(
@@ -676,12 +1045,12 @@ def write_manifest(recipes: list[dict], state: dict, w: dict) -> dict:
         "platform": f"{platform.system()} {platform.machine()}",
         "batteries": [r["id"] for r in recipes],
         "python": {
-            "command": str(BIN / "ue-py"),
-            "executable": str(PY_DIR / ".venv/bin/python"),
+            "command": str(BIN / ("ue-py.cmd" if IS_WIN else "ue-py")),
+            "executable": str(venv_python()),
             "version": PY_VERSION,
             "packages": top,
         },
-        "node": {"command": str(BIN / "ue-node"), "packages": node_packages(w["node"])},
+        "node": {"command": str(BIN / ("ue-node.cmd" if IS_WIN else "ue-node")), "packages": node_packages(w["node"])},
         "bins": {b: resolve_bin(b) for b in w["bins"]},
         "extras": state["extras"],
     }
@@ -722,6 +1091,20 @@ def render_skill(manifest: dict, recipes: list[dict]) -> str:
         .replace("{{NOTES}}", "\n".join(notes).strip())
         .replace("{{PY_PACKAGES}}", "\n".join(f"- {p}" for p in py) or "(none)")
     )
+
+
+def _vscode_ext_dirs(prefix: str) -> list[Path]:
+    out: list[Path] = []
+    for ext_root in (
+        HOME / ".vscode/extensions",
+        HOME / ".vscode-server/extensions",
+        HOME / ".vscode-insiders/extensions",
+        HOME / ".cursor/extensions",
+        HOME / ".windsurf/extensions",
+    ):
+        if ext_root.is_dir():
+            out.extend(sorted(ext_root.glob(f"{prefix}*")))
+    return out
 
 
 def agent_targets() -> list[dict]:
@@ -768,11 +1151,29 @@ def agent_targets() -> list[dict]:
             "instructions": HOME / ".codeium/windsurf/memories/global_rules.md",
             "skills": None,
         },
+        {
+            "id": "cline",
+            "name": "Cline",
+            "detect": [HOME / ".cline", *_vscode_ext_dirs("saoudrizwan.claude-dev")],
+            "bin": "cline",
+            "instructions": HOME / ".cline/rules/unienv.md",
+            "skills": None,
+            "owned_rules_file": True,
+        },
+        {
+            "id": "roo-code",
+            "name": "Roo Code",
+            "detect": [HOME / ".roo", *_vscode_ext_dirs("rooveterinaryinc.roo-cline")],
+            "bin": None,
+            "instructions": HOME / ".roo/rules/unienv.md",
+            "skills": None,
+            "owned_rules_file": True,
+        },
     ]
 
 
 def detected(agent: dict) -> bool:
-    return any(p.exists() for p in agent["detect"]) or bool(which(agent["bin"]))
+    return any(p.exists() for p in agent["detect"]) or bool(agent.get("bin") and which(agent["bin"]))
 
 
 def sync_agents(manifest: dict, recipes: list[dict], *, only_detected: bool = True) -> list[str]:
@@ -808,10 +1209,34 @@ def _zdotdir() -> Path | None:
     return None if same else p
 
 
-def wire_shells() -> list[str]:
+def _shell_files(state: dict | None = None) -> list[Path]:
+    if not SHELL_FILES:
+        return []
+    files = list(SHELL_FILES)
+    zdot = _zdotdir()
+    if zdot is not None:
+        zenv = zdot / ".zshenv"
+        if zenv not in files:
+            files.append(zenv)
+    if state is None:
+        state = load_state(load_recipes()) if STATE_FILE.exists() else {}
+    for raw in state.get("wired_shell_files", []):
+        if isinstance(raw, str) and Path(raw).is_absolute() and Path(raw) not in files and Path(raw).exists():
+            files.append(Path(raw))
+    return files
+
+
+def wire_shells(state: dict | None = None) -> list[str]:
+    if IS_WIN:
+        return []
+    own_state = state is None
+    if state is None:
+        state = load_state(load_recipes())
+    paths = state.setdefault("wired_shell_files", [])
+    before_paths = list(paths)
     body = f'[ -f "{ENV_SH}" ] && . "{ENV_SH}"'
     changed = []
-    for rc in SHELL_FILES:
+    for rc in _shell_files(state):
         # always wire zsh's .zshenv and the POSIX .profile; bash's own files only if they exist
         # (login bash reads .bash_profile or .bash_login *instead of* .profile when present)
         if rc.name not in (".zshenv", ".profile") and not rc.exists():
@@ -819,13 +1244,24 @@ def wire_shells() -> list[str]:
         try:
             if upsert_block(rc, body, SHELL_BEGIN, SHELL_END):
                 changed.append(str(rc).replace(str(HOME), "~"))
+            if rc.name == ".zshenv" and rc.resolve().parent != HOME.resolve():
+                saved = str(rc.resolve())
+                if saved not in paths:
+                    paths.append(saved)
         except OSError as e:
             warn(f"could not update {rc} ({e}); add `source {ENV_SH}` yourself")
+    if own_state and paths != before_paths:
+        save_state(state)
     return changed
 
 
 def do_sync(
-    state: dict, recipes_all: dict, *, quiet: bool = False, wire: bool = True, all_agents: bool = False
+    state: dict,
+    recipes_all: dict,
+    *,
+    quiet: bool = False,
+    wire: bool | None = None,
+    all_agents: bool = False,
 ) -> dict:
     recipes = active_recipes(recipes_all, state)
     w = wanted(recipes, state)
@@ -834,7 +1270,11 @@ def do_sync(
     write_env_sh(state)
     manifest = write_manifest(recipes, state, w)
     agents = sync_agents(manifest, recipes, only_detected=not all_agents)
-    wired = wire_shells() if wire else []
+    before_wired = list(state.get("wired_shell_files", []))
+    should_wire = state.get("options", {}).get("wire_shells", True) if wire is None else wire
+    wired = wire_shells(state) if should_wire else []
+    if state.get("wired_shell_files", []) != before_wired:
+        save_state(state)
     if not quiet:
         info(f"  shims: {', '.join(sorted(p.name for p in BIN.iterdir() if not p.name.startswith('.')))}")
         info(f"  agents configured: {', '.join(agents) or '(none detected)'}")
@@ -883,7 +1323,7 @@ def pick_batteries(recipes_all: dict, current: list[str]) -> list[str]:
                 selected ^= {choices[int(tok) - 1]}
 
 
-def cmd_install(args) -> int:
+def cmd_install(args, *, run_doctor: bool = True) -> int:
     recipes_all = load_recipes()
     first_run = not STATE_FILE.exists()
     state = load_state(recipes_all)
@@ -909,6 +1349,7 @@ def cmd_install(args) -> int:
                 hints.append(f"unknown battery: {b}" + (f" (did you mean {close[0]}?)" if close else ""))
             die("; ".join(hints) + f". Available: {', '.join(recipes_all)}")
         state["batteries"] = uniq(state["batteries"] + [b for b in req if not recipes_all[b].get("always")])
+    state["options"]["wire_shells"] = not args.no_wire
     UNIENV_HOME.mkdir(parents=True, exist_ok=True)
     save_state(state)
     recipes = active_recipes(recipes_all, state)
@@ -922,6 +1363,8 @@ def cmd_install(args) -> int:
         failures = install_system(w, assume_yes=args.yes)
     step(f"Python {PY_VERSION} environment ({len(w['python'])} packages)")
     install_python(w["python"])
+    if "browser" in state.get("batteries", []):
+        install_browsers(assume_yes=args.yes, no_system=args.no_system)
     step(f"Node packages ({len(w['node'])})")
     install_node(w["node"])
     step("Wiring shells and AI tools")
@@ -929,6 +1372,8 @@ def cmd_install(args) -> int:
     log_event(event="install", batteries=[r["id"] for r in recipes], failures=failures)
     if failures:
         warn("Some system packages failed: " + ", ".join(failures))
+    if not run_doctor:
+        return 0
     step("Checking")
     rc = cmd_doctor(argparse.Namespace(json=False, fix=False, quiet_ok=True))
     info("\nOpen a new terminal (or restart your AI tools) so they pick up the new PATH.")
@@ -939,22 +1384,188 @@ def cmd_sync(args) -> int:
     recipes_all = load_recipes()
     state = load_state(recipes_all)
     step("Regenerating shims, env.sh, manifest and agent files")
-    do_sync(state, recipes_all, wire=not args.no_wire, all_agents=args.all_agents)
+    do_sync(state, recipes_all, wire=False if args.no_wire else None, all_agents=args.all_agents)
     return 0
+
+
+def _ver_tuple(v: str) -> tuple[int, ...] | None:
+    # Complex versions require a full PEP 440 / npm parser. Never guess.
+    if not re.fullmatch(r"\d+(?:\.\d+)*", v):
+        return None
+    parts = [int(n) for n in v.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def _version_matches(installed: str, op: str, target: str) -> bool | None:
+    iv = _ver_tuple(installed)
+    wildcard = target.endswith(".*")
+    tv = _ver_tuple(target[:-2] if wildcard else target)
+    if iv is None or tv is None:
+        return None
+    if wildcard:
+        if op not in ("==", "!="):
+            return None
+        prefix = tuple(int(n) for n in target[:-2].split("."))
+        values = iv + (0,) * max(0, len(prefix) - len(iv))
+        result = values[: len(prefix)] == prefix
+        return result if op == "==" else not result
+    if op in ("==", "=", "==="):
+        return iv == tv
+    if op == "!=":
+        return iv != tv
+    if op == ">=":
+        return iv >= tv
+    if op == "<=":
+        return iv <= tv
+    if op == ">":
+        return iv > tv
+    if op == "<":
+        return iv < tv
+    raw = [int(n) for n in target.split(".")]
+    if op == "~=":
+        if len(raw) < 2:
+            return None
+        upper = tuple(raw[:-2] + [raw[-2] + 1])
+        return tv <= iv < upper
+    if op == "~":
+        upper = (raw[0] + 1,) if len(raw) == 1 else (raw[0], raw[1] + 1)
+        return tv <= iv < upper
+    if op == "^":
+        if len(raw) < 3:
+            return None
+        while len(raw) < 3:
+            raw.append(0)
+        index = next((i for i, n in enumerate(raw) if n), len(raw) - 1)
+        upper = tuple(raw[:index] + [raw[index] + 1])
+        return tv <= iv < upper
+    return None
+
+
+def _installed_versions(kind: str, pkgs: list[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if MANIFEST_FILE.exists():
+        with contextlib.suppress(OSError, json.JSONDecodeError, KeyError, TypeError):
+            m = json.loads(MANIFEST_FILE.read_text())
+            raw = m.get(kind, {}).get("packages", {}) or {}
+            out.update({(norm(k) if kind == "python" else k): v for k, v in raw.items() if v})
+    if kind == "python":
+        for k, v in python_packages().items():
+            if v:
+                out[k] = v
+    elif kind == "node":
+        for k, v in node_packages(pkgs).items():
+            if v:
+                out[k] = v
+    return out
+
+
+def _spec_satisfied(
+    kind: str,
+    spec: str,
+    manifest_pkgs: dict[str, str],
+    configured_specs: list[str] | None = None,
+) -> tuple[bool | None, str | None]:
+    if kind == "python":
+        name = py_name(spec)
+        installed = manifest_pkgs.get(name)
+        m = re.match(r"^[A-Za-z0-9_.-]+(?:\[([^\]]+)\])?\s*(.*)$", spec.strip().split(";", 1)[0])
+        extras_str, ver_part = (m.group(1), m.group(2).strip()) if m else (None, "")
+        if not extras_str and not ver_part:
+            return True, installed
+        if extras_str:
+            req_extras = {e.strip().lower() for e in extras_str.split(",") if e.strip()}
+            have_extras: set[str] = set()
+            for cs in configured_specs or []:
+                if py_name(cs) == name:
+                    em = re.search(r"\[([^\]]+)\]", cs)
+                    if em:
+                        have_extras.update(e.strip().lower() for e in em.group(1).split(",") if e.strip())
+            if not req_extras.issubset(have_extras):
+                return None, installed
+        if ver_part:
+            if not installed:
+                return None, None
+            matches = []
+            for clause in (c.strip() for c in ver_part.split(",") if c.strip()):
+                cm = re.fullmatch(r"(===|==|!=|~=|>=|<=|>|<)\s*(.+)", clause)
+                matches.append(_version_matches(installed, cm.group(1), cm.group(2).strip()) if cm else None)
+            if None in matches:
+                return None, installed
+            return all(matches), installed
+        return True, installed
+    if kind == "node":
+        name = node_name(spec)
+        installed = manifest_pkgs.get(name)
+        ver = node_version(spec)
+        if ver in ("latest", "*"):
+            return True, installed
+        if not installed:
+            return None, None
+        if re.fullmatch(r"\d+(?:\.\d+){0,1}", ver):
+            prefix = tuple(int(n) for n in ver.split("."))
+            iv = _ver_tuple(installed)
+            if iv is None:
+                return None, installed
+            padded = iv + (0,) * max(0, len(prefix) - len(iv))
+            return padded[: len(prefix)] == prefix, installed
+        clauses = [c.strip() for c in ver.split() if c.strip()]
+        matches = []
+        for clause in clauses:
+            cm = re.fullmatch(r"(\^|~|>=|<=|>|<|=)?\s*(\d+(?:\.\d+)*)", clause)
+            if not cm:
+                matches.append(None)
+                continue
+            op = cm.group(1) or "=="
+            ver_str = cm.group(2)
+            n_parts = len(ver_str.split("."))
+            if n_parts != 3 and not (op == "~" and n_parts == 2 and len(clauses) == 1):
+                matches.append(None)
+            else:
+                matches.append(_version_matches(installed, op, ver_str))
+        if None in matches:
+            return None, installed
+        return all(matches), installed
+    return True, manifest_pkgs.get(spec)
 
 
 def cmd_need(args) -> int:
     recipes_all = load_recipes()
     state = load_state(recipes_all)
     kind = "node" if args.node else "brew" if args.bin else "cask" if args.cask else "python"
-    if kind in ("brew", "cask") and platform_key() == "debian":
-        kind = "apt"
+    if kind in ("brew", "cask"):
+        pk = platform_key()
+        kind = {"debian": "apt", "fedora": "dnf", "arch": "pacman"}.get(pk, kind)
+        if pk == "windows":
+            kind = "scoop" if which("scoop") else "winget"
     pkgs = args.packages
     recipes = active_recipes(recipes_all, state)
     w = wanted(recipes, state)
 
     key = {"python": py_name, "node": node_name}.get(kind, lambda s: s)
     present = {key(p) for p in w[kind]}
+    already = [p for p in pkgs if key(p) in present]
+    constrained = [
+        p
+        for p in already
+        if (kind == "python" and ("[" in p or re.search(r"[<>=!~]", p)))
+        or (kind == "node" and node_version(p) not in ("latest", "*"))
+    ]
+    if constrained and kind in ("python", "node"):
+        manifest_pkgs = _installed_versions(kind, w[kind] + already)
+        unsatisfied = False
+        for p in constrained:
+            ok, inst_ver = _spec_satisfied(kind, p, manifest_pkgs, w[kind])
+            if ok is False:
+                ver_label = f" {inst_ver}" if inst_ver else ""
+                warn(
+                    f"{key(p)}{ver_label} is installed; `{p}` isn't satisfied. "
+                    "Change the pin with `unienv upgrade` (#27)"
+                )
+                unsatisfied = True
+        if unsatisfied:
+            return 1
     new = [p for p in pkgs if key(p) not in present]
     if not new:
         info(f"✓ already available: {', '.join(pkgs)}")
@@ -973,16 +1584,21 @@ def cmd_need(args) -> int:
         info(f"  note: not in a curated recipe, installing from the public registry: {', '.join(uncurated)}")
 
     # snapshot so a failed install can be rolled back exactly
-    snap = BACKUP_DIR / _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    snap.mkdir(parents=True, exist_ok=True)
-    for f in [
+    tracked = [
         STATE_FILE,
         PY_DIR / "pyproject.toml",
         PY_DIR / "uv.lock",
+        PY_DIR / ".python-version",
         NODE_DIR / "package.json",
         NODE_DIR / "package-lock.json",
-    ]:
-        if f.exists():
+    ]
+    existed = {f: f.exists() for f in tracked}
+    venv = PY_DIR / ".venv"
+    venv_existed = os.path.lexists(venv)
+    snap = BACKUP_DIR / _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    snap.mkdir(parents=True, exist_ok=True)
+    for f in tracked:
+        if existed[f]:
             shutil.copy2(f, snap / f"{f.parent.name}__{f.name}")
 
     state["options"]["exclude"] = [x for x in state["options"]["exclude"] if x not in pkgs]
@@ -991,6 +1607,8 @@ def cmd_need(args) -> int:
     try:
         if kind == "python":
             install_python(w["python"])
+            if "browser" in state.get("batteries", []):
+                install_browsers(assume_yes=args.yes, no_system=True)
         elif kind == "node":
             install_node(w["node"], require_npm=True)
         else:
@@ -1001,6 +1619,10 @@ def cmd_need(args) -> int:
                     "brew": new if kind == "brew" else [],
                     "cask": new if kind == "cask" else [],
                     "apt": new if kind == "apt" else [],
+                    "winget": new if kind == "winget" else [],
+                    "scoop": new if kind == "scoop" else [],
+                    "dnf": new if kind == "dnf" else [],
+                    "pacman": new if kind == "pacman" else [],
                 },
                 assume_yes=args.yes,
             )
@@ -1008,13 +1630,26 @@ def cmd_need(args) -> int:
                 raise RuntimeError(", ".join(failed))
     except (subprocess.CalledProcessError, RuntimeError, SystemExit) as e:
         warn(f"install failed ({e}); rolling back")
-        for f in snap.iterdir():
-            parent, name = f.name.split("__", 1)
-            dest = {"py": PY_DIR, "node": NODE_DIR}.get(parent, UNIENV_HOME) / name
-            shutil.copy2(f, dest)
+        for f in tracked:
+            if existed[f]:
+                shutil.copy2(snap / f"{f.parent.name}__{f.name}", f)
+            elif f.exists():
+                f.unlink()
+        if not existed[NODE_DIR / "package.json"] and (NODE_DIR / "node_modules").exists():
+            shutil.rmtree(NODE_DIR / "node_modules", ignore_errors=True)
+        if not venv_existed and os.path.lexists(venv):
+            if venv.is_symlink():
+                venv.unlink()
+            else:
+                shutil.rmtree(venv)
         state = load_state(recipes_all)
-        if kind == "python":
-            install_python(wanted(recipes, state)["python"])
+        try:
+            if kind == "python" and existed[PY_DIR / "pyproject.toml"]:
+                install_python(wanted(recipes, state)["python"])
+            elif kind == "node" and existed[NODE_DIR / "package.json"]:
+                install_node(wanted(recipes, state)["node"])
+        except (subprocess.CalledProcessError, RuntimeError, SystemExit) as re_err:
+            warn(f"rollback re-install failed ({re_err}); run unienv install to repair")
         log_event(event="need-failed", kind=kind, packages=new)
         return 1
     save_state(state)
@@ -1025,12 +1660,135 @@ def cmd_need(args) -> int:
     return 0
 
 
+def cmd_remove(args) -> int:
+    recipes_all = load_recipes()
+    state = load_state(recipes_all)
+    kind = "node" if args.node else "brew" if args.bin else "cask" if args.cask else "python"
+    if kind in ("brew", "cask") and platform_key() == "debian":
+        kind = "apt"
+    pkgs = args.packages
+    recipes = active_recipes(recipes_all, state)
+    pk = platform_key()
+    key = {"python": py_name, "node": node_name}.get(kind, lambda s: s)
+
+    extras_keys = {key(p) for p in state["extras"][kind]}
+    battery_owner: dict[str, str] = {}
+    for r in recipes:
+        r_pkgs = (
+            r.get(kind, {}).get("packages", [])
+            if kind in ("python", "node")
+            else r.get("system", {}).get(pk, {}).get(kind, [])
+        )
+        for p in r_pkgs:
+            battery_owner.setdefault(key(p), r["id"])
+
+    for p in pkgs:
+        k = key(p)
+        if k not in extras_keys:
+            if k in battery_owner:
+                bat = battery_owner[k]
+                if kind in ("brew", "cask", "apt"):
+                    warn(
+                        f"{p} is provided by the '{bat}' battery (not added with `unienv need`); "
+                        f"use `unienv install --exclude {p}` to skip it"
+                    )
+                else:
+                    warn(
+                        f"{p} is provided by the '{bat}' battery (not added with `unienv need`); "
+                        f"disable the battery with `unienv install --batteries ...` or `unienv install --exclude {p}`"
+                    )
+            else:
+                warn(f"{p} is not installed in extras ({kind})")
+            return 1
+
+    tracked = [
+        STATE_FILE,
+        PY_DIR / "pyproject.toml",
+        PY_DIR / "uv.lock",
+        NODE_DIR / "package.json",
+        NODE_DIR / "package-lock.json",
+    ]
+    existed = {f: f.exists() for f in tracked}
+    snap = BACKUP_DIR / _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    snap.mkdir(parents=True, exist_ok=True)
+    for f in tracked:
+        if existed[f]:
+            shutil.copy2(f, snap / f"{f.parent.name}__{f.name}")
+
+    remove_keys = {key(p) for p in pkgs}
+    removed = [p for p in state["extras"][kind] if key(p) in remove_keys]
+    state["extras"][kind] = [p for p in state["extras"][kind] if key(p) not in remove_keys]
+    w = wanted(recipes, state)
+    still_wanted = {key(x) for x in w[kind]}
+    to_uninstall = [p for p in removed if key(p) not in still_wanted]
+    try:
+        if kind == "python":
+            install_python(w["python"])
+        elif kind == "node":
+            if w["node"]:
+                install_node(w["node"], require_npm=True)
+            elif (NODE_DIR / "package.json").exists():
+                write_package_json([])
+                shutil.rmtree(NODE_DIR / "node_modules", ignore_errors=True)
+                (NODE_DIR / "package-lock.json").unlink(missing_ok=True)
+        elif kind in ("brew", "cask") and to_uninstall:
+            brew = which("brew")
+            cmd = [brew or "brew", "uninstall", *(["--cask"] if kind == "cask" else []), *to_uninstall]
+            if args.yes and brew:
+                run(cmd)
+            else:
+                info(f"  removed from UniEnv extras; to also uninstall from Homebrew, run: {' '.join(cmd)}")
+        elif kind == "apt" and to_uninstall:
+            cmd = ["sudo", "apt-get", "remove", "-y", *to_uninstall]
+            if args.yes:
+                sim = run(["apt-get", "-s", "remove", *to_uninstall], capture=True, check=False)
+                extra_removed = [
+                    m.group(1)
+                    for m in re.finditer(r"(?m)^Remv\s+(\S+)", sim.stdout or "")
+                    if m.group(1) not in to_uninstall
+                ]
+                if extra_removed:
+                    warn(
+                        "aborting apt-get remove because it would also remove dependent packages: "
+                        + ", ".join(extra_removed)
+                    )
+                    raise RuntimeError("apt-get remove would remove extra packages")
+                run(cmd[1:] if os.geteuid() == 0 else cmd)
+            else:
+                info(f"  removed from UniEnv extras; to also uninstall from apt, run: {' '.join(cmd)}")
+    except BaseException as e:
+        warn(f"remove failed ({e}); rolling back")
+        for f in tracked:
+            if existed[f]:
+                shutil.copy2(snap / f"{f.parent.name}__{f.name}", f)
+            elif f.exists():
+                f.unlink()
+        state = load_state(recipes_all)
+        try:
+            if kind == "python" and existed[PY_DIR / "pyproject.toml"]:
+                install_python(wanted(recipes, state)["python"])
+            elif kind == "node" and existed[NODE_DIR / "package.json"]:
+                install_node(wanted(recipes, state)["node"])
+        except (subprocess.CalledProcessError, RuntimeError, SystemExit) as re_err:
+            warn(f"rollback re-install failed ({re_err}); run unienv install to repair")
+        log_event(event="remove-failed", kind=kind, packages=removed)
+        if not isinstance(e, (subprocess.CalledProcessError, RuntimeError, SystemExit)):
+            raise
+        return 1
+
+    save_state(state)
+    do_sync(state, recipes_all, quiet=True)
+    log_event(event="remove", kind=kind, packages=removed)
+    info(f"✓ removed {', '.join(removed)}")
+    return 0
+
+
 def _verify_python_imports(recipes: list[dict]) -> dict[str, str]:
     """Verify battery Python imports. Returns a dict of {module: error_string} for failures."""
     imports = uniq([m for r in recipes for m in r.get("python", {}).get("imports", [])])
     if not imports:
         return {}
-    py = PY_DIR / ".venv/bin/python"
+    py = venv_python()
     if not py.exists():
         return {"python": "shared Python env missing"}
     code = (
@@ -1107,6 +1865,8 @@ def cmd_upgrade(args) -> int:
                 uv_cmd.append("--upgrade")
             run(uv_cmd, env={"UV_PROJECT_ENVIRONMENT": str(PY_DIR / ".venv")})
             install_python(w["python"])
+            if "browser" in state.get("batteries", []):
+                install_browsers(assume_yes=False, no_system=True)
             bad_imports = _verify_python_imports(recipes)
             if bad_imports:
                 details = "; ".join(f"{m}: {err}" for m, err in bad_imports.items())
@@ -1133,6 +1893,7 @@ def cmd_upgrade(args) -> int:
                         *pkgs,
                     ],
                     cwd=NODE_DIR,
+                    env=_puppeteer_cache_env(w["node"]),
                 )
     except (subprocess.CalledProcessError, RuntimeError, SystemExit) as e:
         warn(f"upgrade failed ({e}); rolling back")
@@ -1202,6 +1963,208 @@ def cmd_list(args) -> int:
     return 0
 
 
+def _toml_list(items: list[str]) -> str:
+    return "[" + ", ".join(json.dumps(str(x)) for x in items) + "]"
+
+
+def render_export_toml(state: dict) -> str:
+    batteries = list(state.get("batteries", []))
+    exclude = list(state.get("options", {}).get("exclude", []))
+    extras = state.get("extras", {})
+    lines = [
+        "# Exported by `unienv export`; restore with `unienv import <file>`.",
+        'schema = "unienv/env/v0"',
+        f"batteries = {_toml_list(batteries)}",
+        "",
+        "[options]",
+        f"exclude = {_toml_list(exclude)}",
+        "",
+        "[extras]",
+    ]
+    for kind in ("python", "node", "brew", "cask", "apt"):
+        lines.append(f"{kind} = {_toml_list(list(extras.get(kind, [])))}")
+
+    return "\n".join(lines) + "\n"
+
+
+def validate_env_spec(doc: dict, recipes_all: dict) -> list[str]:
+    problems = []
+    if doc.get("schema") != "unienv/env/v0":
+        problems.append('schema must be "unienv/env/v0"')
+    batteries = doc.get("batteries", [])
+    if not isinstance(batteries, list) or not all(isinstance(x, str) for x in batteries):
+        problems.append("batteries must be a list of strings")
+    else:
+        bad = [b for b in batteries if b not in recipes_all]
+        if bad:
+            problems.append(f"unknown batteries: {', '.join(bad)}")
+    options = doc.get("options", {})
+    if not isinstance(options, dict):
+        problems.append("[options] must be a table")
+    else:
+        exc = options.get("exclude", [])
+        if not isinstance(exc, list) or not all(isinstance(x, str) for x in exc):
+            problems.append("[options].exclude must be a list of strings")
+    extras = doc.get("extras", {})
+    if not isinstance(extras, dict):
+        problems.append("[extras] must be a table")
+    else:
+        for k, v in extras.items():
+            if k not in ("python", "node", "brew", "cask", "apt"):
+                problems.append(f"unknown [extras] key: {k}")
+            elif not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+                problems.append(f"[extras].{k} must be a list of strings")
+            else:
+                for package in v:
+                    if not _valid_import_package(k, package):
+                        problems.append(
+                            f"[extras].{k} contains an unsafe or unsupported package specification: {package!r}"
+                        )
+    return problems
+
+
+def cmd_export(args) -> int:
+    recipes_all = load_recipes()
+    state = load_state(recipes_all)
+    sys.stdout.write(render_export_toml(state))
+    return 0
+
+
+def _valid_import_package(kind: str, value: str) -> bool:
+    if kind == "python":
+        return bool(
+            re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:\[[A-Za-z0-9_,.-]+\])?(?:[<>=!~][A-Za-z0-9.*+!,<>=~_-]+)?", value
+            )
+        )
+    if kind == "node":
+        return bool(
+            re.fullmatch(r"(?:@[A-Za-z0-9_.-]+/)?[A-Za-z0-9][A-Za-z0-9_.-]*(?:@[A-Za-z0-9.^~*<>=|_-]+)?", value)
+        )
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+_.@-]*", value))
+
+
+def cmd_import(args) -> int:
+    recipes_all = load_recipes()
+    try:
+        raw = sys.stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8")
+        doc = tomllib.loads(raw)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        die(f"invalid environment file {args.file!r}: {exc}")
+    problems = validate_env_spec(doc, recipes_all)
+    if problems:
+        die(f"invalid environment file {args.file!r}: " + "; ".join(problems))
+    if "locks" in doc:
+        warn("Imported lock hashes are informational only and ignored; package resolution is platform-specific.")
+    previous = load_state(recipes_all)
+    state = json.loads(json.dumps(previous))
+    state["batteries"] = [b for b in uniq(doc.get("batteries", [])) if not recipes_all[b].get("always")]
+    state["options"]["exclude"] = uniq(doc.get("options", {}).get("exclude", []))
+    for kind in ("python", "node", "brew", "cask", "apt"):
+        state["extras"][kind] = uniq(doc.get("extras", {}).get(kind, []))
+    info("Import plan:")
+    info("  batteries: " + ", ".join(state["batteries"]))
+    if state["options"]["exclude"]:
+        info("  exclude: " + ", ".join(state["options"]["exclude"]))
+    for kind, packages in state["extras"].items():
+        if packages:
+            info(f"  {kind}: {', '.join(packages)}")
+        removed_extras = [p for p in previous.get("extras", {}).get(kind, []) if p not in packages]
+        if removed_extras:
+            info(f"  remove {kind}: {', '.join(removed_extras)}")
+    if not args.yes:
+        confirmed = False
+        if args.file == "-":
+            tty = _tty()
+            if tty is not None:
+                tin, tout = tty
+                try:
+                    tout.write("Apply this environment? [y/N] ")
+                    tout.flush()
+                    confirmed = tin.readline().strip().lower() in ("y", "yes")
+                finally:
+                    tin.close()
+                    tout.close()
+            else:
+                warn("cannot prompt for confirmation when reading from stdin without a TTY; pass -y/--yes")
+        else:
+            try:
+                confirmed = input("Apply this environment? [y/N] ").strip().lower() in ("y", "yes")
+            except EOFError:
+                confirmed = False
+        if not confirmed:
+            info("Import cancelled; no state changed.")
+            return 1
+    tracked = [
+        STATE_FILE,
+        PY_DIR / "pyproject.toml",
+        PY_DIR / "uv.lock",
+        PY_DIR / ".python-version",
+        NODE_DIR / "package.json",
+        NODE_DIR / "package-lock.json",
+    ]
+    saved = {path: path.read_bytes() if path.exists() else None for path in tracked}
+    dirs = {path: os.path.lexists(path) for path in (PY_DIR / ".venv", NODE_DIR / "node_modules")}
+
+    def restore_files():
+        for path, content in saved.items():
+            if content is None:
+                if path.exists():
+                    path.unlink()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+        for path, existed in dirs.items():
+            if not existed and os.path.lexists(path):
+                if path.is_symlink():
+                    path.unlink()
+                else:
+                    shutil.rmtree(path)
+
+    try:
+        save_state(state)
+        result = cmd_install(
+            argparse.Namespace(
+                batteries=None,
+                add=None,
+                exclude=None,
+                no_system=args.no_system,
+                no_wire=args.no_wire,
+                all_agents=False,
+                yes=args.yes,
+            ),
+            run_doctor=False,
+        )
+        if result:
+            raise RuntimeError(f"installation returned {result}")
+    except (Exception, SystemExit, KeyboardInterrupt) as exc:
+        warn(f"import failed ({exc}); rolling back")
+        restore_files()
+        try:
+            wanted_before = wanted(active_recipes(recipes_all, previous), previous)
+            try:
+                if saved[PY_DIR / "pyproject.toml"] is not None:
+                    install_python(wanted_before["python"])
+                if saved[NODE_DIR / "package.json"] is not None:
+                    install_node(wanted_before["node"], require_npm=True)
+            finally:
+                do_sync(previous, recipes_all, wire=not args.no_wire)
+        except (Exception, SystemExit, KeyboardInterrupt) as repair_error:
+            warn(f"rollback repair failed ({repair_error}); run unienv install to repair")
+        finally:
+            restore_files()
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        return 1
+    log_event(event="import", batteries=state["batteries"])
+    step("Checking")
+    doctor_rc = cmd_doctor(argparse.Namespace(json=False, fix=False, quiet_ok=True))
+    if doctor_rc:
+        warn("Imported environment, but `unienv doctor` reported issues (see above).")
+    info("Imported environment.")
+    return 0
+
+
 def cmd_status(args) -> int:
     """`unienv` with no arguments: a one-screen overview."""
     info(_c("1;36", "UniEnv AI") + f" {VERSION}  " + _c("2", "one always-ready environment for every AI tool"))
@@ -1230,9 +2193,22 @@ def cmd_status(args) -> int:
 
 
 REPO_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/archive/{ref}.tar.gz"
+LATEST_RELEASE_API = "https://api.github.com/repos/rupeshbharambe24/unienv-ai/releases/latest"
+RELEASE_TARBALL = "https://github.com/rupeshbharambe24/unienv-ai/releases/download/{ref}/unienv-ai-{ref}.tar.gz"
+RELEASE_SHA256SUMS = "https://github.com/rupeshbharambe24/unienv-ai/releases/download/{ref}/SHA256SUMS"
 
 
 # ── MCP server for desktop apps ─────────────────────────────────────────────
+
+
+MCP_CLIENT_KEYS = {
+    "claude-desktop": "mcpServers",
+    "cursor": "mcpServers",
+    "windsurf": "mcpServers",
+    "lm-studio": "mcpServers",
+    "vscode": "servers",
+    "zed": "context_servers",
+}
 
 
 def mcp_clients() -> dict[str, Path]:
@@ -1242,37 +2218,91 @@ def mcp_clients() -> dict[str, Path]:
         if IS_MAC
         else (HOME / ".config/Claude/claude_desktop_config.json"),
         "cursor": HOME / ".cursor/mcp.json",
+        "windsurf": HOME / ".codeium/windsurf/mcp_config.json",
+        "lm-studio": HOME / ".lmstudio/mcp.json",
+        "vscode": (HOME / "Library/Application Support/Code/User/mcp.json")
+        if IS_MAC
+        else (HOME / ".config/Code/User/mcp.json"),
+        "zed": HOME / ".config/zed/settings.json",
     }
 
 
-def mcp_entry() -> dict:
+def mcp_client_key(client: str | Path) -> str:
+    if isinstance(client, Path):
+        for name, path in mcp_clients().items():
+            if path == client:
+                return MCP_CLIENT_KEYS.get(name, "mcpServers")
+        return "mcpServers"
+    return MCP_CLIENT_KEYS.get(client, "mcpServers")
+
+
+def _mcp_client_installed(name: str, path: Path) -> bool:
+    return path.exists() or path.parent.exists()
+
+
+def mcp_entry(client: str | None = None) -> dict:
     # absolute path: GUI apps start servers with a minimal PATH (the `spawn ENOENT` bug class)
-    return {"command": str(BIN / "unienv"), "args": ["mcp"]}
+    entry: dict = {"command": str(BIN / "unienv"), "args": ["mcp"]}
+    if client == "vscode":
+        return {"type": "stdio", **entry}
+    return entry
+
+
+def _zed_has_comments(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if not re.search(r"(^|\s)//|/\*", raw, re.M):
+        return False
+    try:
+        json.loads(raw)
+        return False
+    except json.JSONDecodeError:
+        return True
 
 
 def _load_json(path: Path) -> dict:
     if not path.exists() or not path.read_text().strip():
         return {}
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except json.JSONDecodeError:
         die(f"{path} is not valid JSON; fix it first (UniEnv won't overwrite it).")
+    if not isinstance(data, dict):
+        die(f"{path} is not a JSON object; fix it first (UniEnv won't overwrite it).")
+    return data
 
 
-def mcp_set(path: Path, entry: dict | None) -> bool:
+def mcp_set(path: Path, entry: dict | None, *, key: str | None = None) -> bool:
     """Add (entry) or remove (None) the unienv server in an MCP client config, keeping a backup.
 
     Other servers are never touched. Returns True if the file changed.
     """
     if entry is None and not path.exists():
         return False
+    resolved_key = key or mcp_client_key(path)
     data = _load_json(path)
-    servers = data.setdefault("mcpServers", {})
-    if servers.get("unienv") == entry:
-        return False
     if entry is None:
-        servers.pop("unienv")
+        changed = False
+        for k in uniq([resolved_key, "mcpServers"]):
+            servers = data.get(k)
+            if isinstance(servers, dict) and "unienv" in servers:
+                servers.pop("unienv")
+                changed = True
+        if not changed:
+            return False
     else:
+        servers = data.get(resolved_key)
+        if servers is None:
+            servers = {}
+            data[resolved_key] = servers
+        elif not isinstance(servers, dict):
+            die(f"{path} has invalid {resolved_key} (expected an object); fix it first.")
+        if servers.get("unienv") == entry:
+            return False
         servers["unienv"] = entry
     if path.exists():
         backup = path.with_name(path.name + f".unienv-backup-{_dt.datetime.now():%Y%m%d-%H%M%S}")
@@ -1289,15 +2319,34 @@ def cmd_mcp(args) -> int:
 
         return unienv_mcp.serve()
     if args.action == "config":
-        print(json.dumps({"mcpServers": {"unienv": mcp_entry()}}, indent=2))
+        root_key = mcp_client_key(args.client) if args.client != "all" else "mcpServers"
+        entry_client = args.client if args.client != "all" else None
+        print(json.dumps({root_key: {"unienv": mcp_entry(entry_client)}}, indent=2))
         return 0
     clients = mcp_clients()
     targets = list(clients) if args.client == "all" else [args.client]
+    failed = False
     for name in targets:
         path = clients[name]
-        if args.action == "install" and name != "claude-desktop" and args.client == "all" and not path.parent.exists():
+        if (
+            args.action == "install"
+            and name != "claude-desktop"
+            and args.client == "all"
+            and not _mcp_client_installed(name, path)
+        ):
             continue  # only touch clients that are actually installed
-        if mcp_set(path, mcp_entry() if args.action == "install" else None):
+        if name == "zed" and _zed_has_comments(path):
+            if args.action == "install":
+                info(f"  i {path} contains comments; paste this snippet into Zed (`unienv mcp config --client zed`):")
+                print(json.dumps({mcp_client_key("zed"): {"unienv": mcp_entry("zed")}}, indent=2))
+            continue
+        try:
+            changed = mcp_set(path, mcp_entry(name) if args.action == "install" else None, key=mcp_client_key(name))
+        except SystemExit:
+            failed = True
+            warn(f"skipped {name}: fix its JSON configuration and retry")
+            continue
+        if changed:
             verb = "added to" if args.action == "install" else "removed from"
             info(f"  ✓ unienv MCP server {verb} {name} ({path})")
         elif args.action == "install":
@@ -1305,7 +2354,7 @@ def cmd_mcp(args) -> int:
     if args.action == "install":
         info("\nRestart the app (quit it fully, then reopen) to load the UniEnv tools.")
         log_event(event="mcp-install", clients=targets)
-    return 0
+    return int(failed)
 
 
 def mcp_handshake(timeout: float = 15) -> tuple[bool, str, float]:
@@ -1350,17 +2399,128 @@ def mcp_handshake(timeout: float = 15) -> tuple[bool, str, float]:
         return False, f"{type(e).__name__}: {e}", time.monotonic() - start
 
 
+def _version_tuple(ver: str) -> tuple[int, ...]:
+    cleaned = ver.lstrip("v").split("-", 1)[0]
+    return tuple(int(p) if p.isdigit() else 0 for p in cleaned.split("."))
+
+
+def _latest_release_tag() -> str | None:
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(LATEST_RELEASE_API, headers={"Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        tag = data.get("tag_name")
+        return str(tag) if tag else None
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def _is_release_tag(ref: str) -> bool:
+    return bool(re.fullmatch(r"v\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.]+)?", ref))
+
+
+def _fetch_release_sha256(ref: str) -> str:
+    import urllib.error
+    import urllib.request
+
+    url = RELEASE_SHA256SUMS.format(ref=ref)
+    target_name = f"unienv-ai-{ref}.tar.gz"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            text = resp.read().decode("utf-8")
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, UnicodeDecodeError) as e:
+        die(
+            f"could not download UniEnv ref {ref!r} ({e}); "
+            "check the branch or tag name, or pass `--sha256 <digest>` / `--ref main` to override"
+        )
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        digest = parts[0].lower()
+        name = parts[-1].lstrip("*")
+        if re.fullmatch(r"[0-9a-f]{64}", digest) and name == target_name:
+            return digest
+    die(
+        f"could not verify SHA256SUMS for release {ref!r} ({target_name} entry missing); "
+        "pass `--sha256 <digest>` or `--ref main` to override"
+    )
+    return ""
+
+
+def _safe_extract_tar(tar: tarfile.TarFile, dest: Path) -> None:
+    """Extract a tarball safely on both Python 3.11.4+ (filter='data') and 3.11.0-3.11.3."""
+    dest_path = Path(dest).resolve()
+    if getattr(tarfile, "data_filter", None) is not None:
+        tar.extractall(dest_path, filter="data")
+        return
+    for member in tar.getmembers():
+        name = member.name
+        p = Path(name)
+        if name.startswith("/") or p.is_absolute() or ".." in p.parts:
+            raise ValueError(f"unsafe tar member path: {name!r}")
+        if not (member.isfile() or member.isdir()):
+            raise ValueError(f"unsafe tar member type: {name!r}; fallback accepts only files and directories")
+        target = (dest_path / name).resolve()
+        if target != dest_path and dest_path not in target.parents:
+            raise ValueError(f"tar member escapes destination: {name!r}")
+        if member.isdir():
+            member.mode = 0o755
+        else:
+            member.mode = (member.mode | 0o600) & 0o755
+    with contextlib.ExitStack() as stack:
+        if hasattr(tar, "extraction_filter"):
+            orig_filter = tar.extraction_filter
+            tar.extraction_filter = staticmethod(lambda member, path: member)
+            stack.callback(setattr, tar, "extraction_filter", orig_filter)
+        tar.extractall(dest_path)
+
+
 def cmd_update(args) -> int:
     """Download the latest UniEnv, replace ~/.unienv/share, then re-run install with the new code."""
-    import tarfile
+    import hashlib
     import tempfile
     import urllib.error
     import urllib.request
 
+    if getattr(args, "check", False):
+        latest = _latest_release_tag()
+        if not latest:
+            die("could not query the latest UniEnv release tag")
+        if _version_tuple(latest) > _version_tuple(VERSION):
+            info(f"A newer version is available: {latest} (installed: v{VERSION}). Run `unienv update`.")
+        else:
+            info(f"UniEnv v{VERSION} is up to date (latest: {latest}).")
+        return 0
+
     share = UNIENV_HOME / "share"
     if share.is_symlink():
         die(f"{share} links to a development checkout; update it with `git pull` instead.")
-    url = REPO_TARBALL.format(ref=args.ref)
+    ref = getattr(args, "ref", None)
+    explicit_ref = bool(ref)
+    if not ref:
+        ref = _latest_release_tag()
+        if not ref:
+            die(
+                "could not resolve the latest UniEnv release tag; "
+                "pass `unienv update --ref main` to install from main without release verification"
+            )
+    is_release = not explicit_ref or _is_release_tag(ref)
+    explicit_sha = getattr(args, "sha256", None)
+    expected_sha = explicit_sha
+    if not expected_sha and is_release:
+        expected_sha = _fetch_release_sha256(ref)
+    if not is_release and not expected_sha:
+        warn(f"installing {ref} without checksum verification")
+
+    no_wire = getattr(args, "no_wire", False) or not load_state(load_recipes()).get("options", {}).get(
+        "wire_shells", True
+    )
+    use_release_asset = is_release and not explicit_sha
+    url = RELEASE_TARBALL.format(ref=ref) if use_release_asset else REPO_TARBALL.format(ref=ref)
     step(f"Downloading {url}")
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "unienv.tar.gz"
@@ -1368,20 +2528,52 @@ def cmd_update(args) -> int:
             with urllib.request.urlopen(url) as resp, archive.open("wb") as out:
                 shutil.copyfileobj(resp, out)
         except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
-            die(f"could not download UniEnv ref {args.ref!r} ({e}); check the branch or tag name")
-        with tarfile.open(archive) as tar:
-            tar.extractall(tmp, filter="data")
-        src = next(Path(tmp).glob("unienv-ai-*"))
+            die(f"could not download UniEnv ref {ref!r} ({e}); check the branch or tag name")
+        if expected_sha:
+            actual_sha = hashlib.sha256(archive.read_bytes()).hexdigest().lower()
+            if actual_sha != expected_sha.lower():
+                die(f"SHA-256 mismatch for {ref}: expected {expected_sha.lower()}, got {actual_sha}")
+
+        prev_share = UNIENV_HOME / "share.prev"
         new_share = UNIENV_HOME / "share.new"
+        shutil.rmtree(prev_share, ignore_errors=True)
         shutil.rmtree(new_share, ignore_errors=True)
-        new_share.mkdir(parents=True)
-        for part in ("src", "recipes", "templates", "shims"):
-            shutil.copytree(src / part, new_share / part)
-    shutil.rmtree(share, ignore_errors=True)
-    new_share.rename(share)
-    step("Re-installing with the new version")
-    cli = share / "src/unienv.py"
-    return subprocess.call([sys.executable, str(cli), "install"] + (["--no-wire"] if args.no_wire else []))
+        if share.exists():
+            shutil.copytree(share, prev_share)
+        install_args = ["install"] + (["--no-wire"] if no_wire else [])
+        try:
+            with tarfile.open(archive) as tar:
+                _safe_extract_tar(tar, Path(tmp))
+            src = next(Path(tmp).glob("unienv-ai-*"))
+            new_share.mkdir(parents=True)
+            for part in ("src", "recipes", "templates", "shims"):
+                shutil.copytree(src / part, new_share / part)
+            shutil.rmtree(share, ignore_errors=True)
+            new_share.rename(share)
+            step("Re-installing with the new version")
+            cli = share / "src/unienv.py"
+            rc = subprocess.call([sys.executable, str(cli), *install_args])
+            if rc != 0:
+                raise RuntimeError(f"install exited with code {rc}")
+        except BaseException as e:
+            warn(f"update failed ({e}); restoring previous share from {prev_share}")
+            shutil.rmtree(new_share, ignore_errors=True)
+            if prev_share.exists():
+                shutil.rmtree(share, ignore_errors=True)
+                prev_share.rename(share)
+                old_cli = share / "src/unienv.py"
+                if old_cli.exists():
+                    try:
+                        restore_rc = subprocess.call([sys.executable, str(old_cli), *install_args])
+                        if restore_rc != 0:
+                            warn(f"rollback restore exited with code {restore_rc}; run unienv install to repair")
+                    except BaseException as restore_err:
+                        warn(f"rollback restore failed ({restore_err}); run unienv install to repair")
+            if not isinstance(e, Exception):
+                raise
+            return 1
+        shutil.rmtree(prev_share, ignore_errors=True)
+        return 0
 
 
 # ── doctor ──────────────────────────────────────────────────────────────────
@@ -1483,7 +2675,7 @@ def _probe_shell_aliases(diagnostics: list[tuple[str, str]] | None = None) -> li
     return findings
 
 
-def _clean_shell_probe(argv: list[str]) -> str | None:
+def _clean_shell_probe(argv: list[str], *, extra_env: dict[str, str] | None = None) -> str | None:
     """Run `command -v ue-py` in a shell started from a near-empty environment, like an agent or GUI app."""
     env = {
         "HOME": str(HOME),
@@ -1493,6 +2685,8 @@ def _clean_shell_probe(argv: list[str]) -> str | None:
     }
     if "UNIENV_HOME" in os.environ:
         env["UNIENV_HOME"] = os.environ["UNIENV_HOME"]
+    if extra_env:
+        env.update(extra_env)
     try:
         r = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -1518,10 +2712,20 @@ def cmd_doctor(args) -> int:
     add("prefix", "ok", str(UNIENV_HOME))
 
     # Python environment and imports
-    py = PY_DIR / ".venv/bin/python"
+    py = venv_python()
     imports = uniq([m for r in recipes for m in r.get("python", {}).get("imports", [])])
-    if not py.exists():
-        add("python", "fail", "shared Python env missing", "unienv install")
+    if not py.exists() or not os.access(py, os.X_OK):
+        dangling = py.is_symlink()
+        add(
+            "python",
+            "fail",
+            f"shared Python base interpreter missing (dangling symlink: {os.readlink(py)})"
+            if dangling
+            else "shared Python env missing",
+            "curl -fsSL https://raw.githubusercontent.com/rupeshbharambe24/unienv-ai/main/install.sh | bash"
+            if dangling
+            else "unienv install",
+        )
     else:
         code = (
             "import importlib, json, sys\nbad = {}\n"
@@ -1568,16 +2772,34 @@ def cmd_doctor(args) -> int:
         )
 
     # Shell wiring: what agents and GUI apps actually see
+    for rc in SHELL_FILES:
+        if not rc.exists():
+            continue
+        try:
+            rc_text, _ = _read_block_text(rc)
+        except OSError:
+            continue
+        if _has_malformed_block(rc_text, SHELL_BEGIN, SHELL_END):
+            short = str(rc).replace(str(HOME), "~")
+            add(
+                f"block:{rc.name}",
+                "fail",
+                f"{short} has an incomplete UniEnv block (missing end marker)",
+                f"restore `{SHELL_END}` or delete the orphaned `{SHELL_BEGIN}` line in {short}, then run `unienv sync`",
+            )
     target = str(BIN / "ue-py")
     probes = [
-        ("zsh -c", ["/bin/zsh", "-c", "command -v ue-py"]),
-        ("zsh -lc", ["/bin/zsh", "-lc", "command -v ue-py"]),
-        ("bash -lc", ["/bin/bash", "-lc", "command -v ue-py"]),
+        ("zsh -c", ["/bin/zsh", "-c", "command -v ue-py"], None),
+        ("zsh -lc", ["/bin/zsh", "-lc", "command -v ue-py"], None),
+        ("bash -lc", ["/bin/bash", "-lc", "command -v ue-py"], None),
     ]
-    for label, argv in probes:
+    zdot = _zdotdir()
+    if zdot is not None:
+        probes.append(("ZDOTDIR zsh -c", ["/bin/zsh", "-c", "command -v ue-py"], {"ZDOTDIR": str(zdot)}))
+    for label, argv, extra_env in probes:
         if not Path(argv[0]).exists():
             continue
-        got = _clean_shell_probe(argv)
+        got = _clean_shell_probe(argv) if extra_env is None else _clean_shell_probe(argv, extra_env=extra_env)
         if got == target:
             add(f"shell:{label}", "ok", f"`{label}` finds ue-py")
         else:
@@ -1608,8 +2830,22 @@ def cmd_doctor(args) -> int:
         for a in agent_targets():
             if not detected(a):
                 continue
-            cur = read_block(a["instructions"], MD_BEGIN, MD_END)
-            short = str(a["instructions"]).replace(str(HOME), "~")
+            inst = a["instructions"]
+            short = str(inst).replace(str(HOME), "~")
+            try:
+                inst_text = _read_block_text(inst)[0] if inst.exists() else ""
+            except OSError as exc:
+                add(f"agent:{a['id']}", "warn", f"{a['name']}: cannot read {short}: {exc}")
+                continue
+            if _has_malformed_block(inst_text, MD_BEGIN, MD_END):
+                add(
+                    f"agent:{a['id']}",
+                    "fail",
+                    f"{a['name']}: {short} has an incomplete UniEnv block (missing end marker)",
+                    f"restore `{MD_END}` or delete the orphaned `{MD_BEGIN}` line in {short}, then run `unienv sync`",
+                )
+                continue
+            cur = read_block(inst, MD_BEGIN, MD_END)
             if cur is None:
                 add(f"agent:{a['id']}", "fail", f"{a['name']}: no UniEnv block in {short}", "unienv sync")
             elif cur.rstrip() != expected:
@@ -1650,16 +2886,19 @@ def cmd_doctor(args) -> int:
             raw = p.read_text(encoding="utf-8", errors="replace").strip()
             data = json.loads(raw) if raw else {}
         except (OSError, json.JSONDecodeError):
+            if n == "zed" and _zed_has_comments(p):
+                continue
             add(f"mcp:{n}", "warn", f"{p} is not valid JSON; can't check the unienv entry")
             continue
         if not isinstance(data, dict):
             add(f"mcp:{n}", "warn", f"{p} is not a JSON object; can't check the unienv entry")
             continue
-        servers = data.get("mcpServers")
+        key = mcp_client_key(n)
+        servers = data.get(key)
         if servers is None:
             continue
         if not isinstance(servers, dict):
-            add(f"mcp:{n}", "warn", f"{p} has invalid mcpServers (expected an object); can't check the unienv entry")
+            add(f"mcp:{n}", "warn", f"{p} has invalid {key} (expected an object); can't check the unienv entry")
             continue
         if "unienv" in servers:
             configured.append(n)
@@ -1787,13 +3026,49 @@ def cmd_wire(args) -> int:
         run(["launchctl", "setenv", "PATH", path])
         info("✓ GUI PATH set (experimental). Quit and reopen desktop apps to pick it up.")
         return 0
-    changed = wire_shells()
+    recipes_all = load_recipes()
+    state = load_state(recipes_all)
+    changed = wire_shells(state)
+    state["options"]["wire_shells"] = True
+    save_state(state)
     info("✓ shell files updated: " + (", ".join(changed) if changed else "already wired"))
     return 0
 
 
+def _remove_windows_path() -> None:
+    marker = UNIENV_HOME / "windows-path.json"
+    if not IS_WIN or not marker.exists():
+        return
+    import winreg
+
+    owned = json.loads(marker.read_text(encoding="utf-8-sig"))["entry"]
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+        current, kind = winreg.QueryValueEx(key, "Path")
+        parts = current.split(";")
+        for i, part in enumerate(parts):
+            if os.path.normcase(part.rstrip("\\\\/")) == os.path.normcase(owned.rstrip("\\\\/")):
+                del parts[i]
+                break
+        winreg.SetValueEx(key, "Path", 0, kind, ";".join(parts))
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        ctypes.windll.user32.SendMessageTimeoutW(
+            0xFFFF,  # HWND_BROADCAST
+            0x001A,  # WM_SETTINGCHANGE
+            0,
+            "Environment",
+            0x0002,  # SMTO_ABORTIFHUNG
+            5000,
+            None,
+        )
+    marker.unlink()
+
+
 def cmd_uninstall(args) -> int:
-    for rc in SHELL_FILES:
+    _uninstall_sandbox()
+    _remove_windows_path()
+    for rc in _shell_files():
         try:
             if remove_block(rc, SHELL_BEGIN, SHELL_END):
                 info(f"  removed block from {rc}")
@@ -1803,6 +3078,8 @@ def cmd_uninstall(args) -> int:
         try:
             if remove_block(a["instructions"], MD_BEGIN, MD_END):
                 info(f"  removed block from {a['instructions']}")
+            if a.get("owned_rules_file") and a["instructions"].exists() and not a["instructions"].read_text().strip():
+                a["instructions"].unlink()
         except OSError as e:
             warn(f"could not update {a['instructions']} ({e}); remove the UniEnv block manually")
         if a["skills"] is not None and (a["skills"] / "unienv").exists():
@@ -1813,8 +3090,10 @@ def cmd_uninstall(args) -> int:
                 warn(f"could not remove {a['skills'] / 'unienv'} ({e})")
     # desktop apps would otherwise keep trying to start a server that no longer exists
     for name, path in mcp_clients().items():
+        if name == "zed" and _zed_has_comments(path):
+            continue
         try:
-            if mcp_set(path, None):
+            if mcp_set(path, None, key=mcp_client_key(name)):
                 info(f"  removed the unienv MCP server from {name} ({path})")
         except SystemExit:  # invalid JSON: _load_json already explained; keep uninstalling
             pass
@@ -1826,6 +3105,331 @@ def cmd_uninstall(args) -> int:
         shutil.rmtree(UNIENV_HOME)
         info(f"  deleted {UNIENV_HOME}")
     info("✓ UniEnv unwired. System packages installed with Homebrew/apt were left in place.")
+    return 0
+
+
+# ── sandbox profiles ────────────────────────────────────────────────────────
+
+
+def _sandbox_read_roots() -> list[str]:
+    return [str(UNIENV_HOME)]
+
+
+def _toml_text(data: dict) -> str:
+    """Serialize parsed TOML values without changing their types or table scope."""
+
+    def value(item):
+        if isinstance(item, str):
+            return json.dumps(item, ensure_ascii=False)
+        if isinstance(item, bool):
+            return str(item).lower()
+        if isinstance(item, (int, float)):
+            return repr(item)
+        if isinstance(item, list):
+            return "[" + ", ".join(value(v) for v in item) + "]"
+        if isinstance(item, dict):
+            return (
+                "{ " + ", ".join(json.dumps(k, ensure_ascii=False) + " = " + value(v) for k, v in item.items()) + " }"
+            )
+        if isinstance(item, (_dt.datetime, _dt.date, _dt.time)):
+            return item.isoformat()
+        raise ValueError(f"unsupported TOML value: {type(item).__name__}")
+
+    def fmt_key(k: str) -> str:
+        return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k, ensure_ascii=False)
+
+    scalars = [f"{fmt_key(k)} = {value(v)}" for k, v in data.items() if not isinstance(v, dict)]
+    tables = []
+    for k, v in data.items():
+        if isinstance(v, dict):
+            body = "\n".join(f"{fmt_key(sk)} = {value(sv)}" for sk, sv in v.items())
+            tables.append(f"[{fmt_key(k)}]\n{body}" if body else f"[{fmt_key(k)}]")
+    parts = (["\n".join(scalars)] if scalars else []) + tables
+    return "\n\n".join(parts) + "\n" if parts else ""
+
+
+def _edit_codex_sandbox_toml(
+    raw: str,
+    desired_roots: list[str] | None,
+    *,
+    remove_table_if_empty: bool = False,
+) -> str:
+    """Surgically update only [sandbox_workspace_write].writable_roots in TOML text."""
+    roots_lit = (
+        "[" + ", ".join(json.dumps(r, ensure_ascii=False) for r in desired_roots) + "]"
+        if desired_roots is not None
+        else None
+    )
+    hdr = re.search(r"(?m)^[ \t]*\[sandbox_workspace_write\][ \t]*(?:#.*)?$", raw)
+    if hdr is None:
+        if roots_lit is None:
+            return raw
+        sep = "" if not raw else ("\n" if raw.endswith("\n") else "\n\n")
+        return f"{raw}{sep}[sandbox_workspace_write]\nwritable_roots = {roots_lit}\n"
+
+    next_hdr = re.search(r"(?m)^[ \t]*\[(?:\[)?[^\]\n]+\](?:\])?[ \t]*(?:#.*)?$", raw[hdr.end() :])
+    sec_start = hdr.end()
+    sec_end = sec_start + next_hdr.start() if next_hdr else len(raw)
+    sec = raw[sec_start:sec_end]
+    wr = re.search(
+        r"(?ms)^([ \t]*writable_roots[ \t]*=[ \t]*)(\[[^\]]*\])([ \t]*(?:#[^\n]*)?)(?:\r?\n|$)",
+        sec,
+    )
+    if roots_lit is not None:
+        if wr is not None:
+            new_sec = sec[: wr.start(2)] + roots_lit + sec[wr.end(2) :]
+        else:
+            new_sec = f"\nwritable_roots = {roots_lit}" + sec
+        return raw[:sec_start] + new_sec + raw[sec_end:]
+
+    # Removing writable_roots key (and optionally the table if empty)
+    if wr is not None:
+        new_sec = sec[: wr.start()] + sec[wr.end() :]
+    else:
+        new_sec = sec
+    if remove_table_if_empty:
+        remaining = [ln.strip() for ln in new_sec.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        if not remaining:
+            prefix = raw[: hdr.start()].rstrip("\n")
+            suffix = raw[sec_end:].lstrip("\n")
+            if prefix and suffix:
+                return prefix + "\n\n" + suffix
+            if prefix:
+                return prefix + "\n"
+            return suffix
+    return raw[:sec_start] + new_sec + raw[sec_end:]
+
+
+def sandbox_profile(tool: str) -> str:
+    root = str(UNIENV_HOME)
+    if tool == "claude":
+        return json.dumps(
+            {
+                "permissions": {"allow": [f"Read(/{UNIENV_HOME.as_posix()}/**)"]},
+                "sandbox": {"filesystem": {"allowRead": [root], "allowWrite": [root]}},
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    if tool == "codex":
+        return f"[sandbox_workspace_write]\nwritable_roots = [{json.dumps(root, ensure_ascii=False)}]\n"
+    if tool in ("gemini", "seatbelt"):
+        escaped = json.dumps(root, ensure_ascii=False)
+        return (
+            ";; Merge into an existing Seatbelt profile; this is not a complete policy.\n"
+            f"(allow file-read* file-map-executable (subpath {escaped}))\n"
+            f"(allow file-write* (subpath {escaped}))"
+        )
+    die(f"unknown sandbox tool: {tool}")
+
+
+def _sandbox_load(path: Path, tool: str) -> dict:
+    try:
+        raw = path.read_text(encoding="utf-8") if path.exists() else ""
+        data = tomllib.loads(raw) if tool == "codex" else (json.loads(raw) if raw.strip() else {})
+        if not isinstance(data, dict):
+            raise ValueError("expected a configuration object")
+        return data
+    except (ValueError, OSError) as exc:
+        die(f"cannot read sandbox settings {path}: {exc}")
+
+
+def _sandbox_state() -> tuple[Path, dict]:
+    path = UNIENV_HOME / "sandbox-settings.json"
+    return path, _sandbox_load(path, "claude")
+
+
+def _read_text_with_eol(path: Path) -> tuple[str, str]:
+    if not path.exists():
+        return "", "\n"
+    with path.open("r", encoding="utf-8", newline="") as f:
+        raw = f.read()
+    eol = "\r\n" if "\r\n" in raw else "\n"
+    return raw.replace("\r\n", "\n"), eol
+
+
+def _write_preserving_link_and_mode(path: Path, text: str, *, eol: str = "\n") -> None:
+    target = Path(os.path.realpath(path)) if path.is_symlink() else path
+    mode = (target.stat().st_mode & 0o7777) if target.exists() else None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.parent / f".{target.name}.tmp.{os.getpid()}"
+    data = text.replace("\n", eol).encode("utf-8")
+    try:
+        tmp.write_bytes(data)
+        if mode is not None:
+            with contextlib.suppress(OSError):
+                tmp.chmod(mode)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _sandbox_write(
+    path: Path,
+    data: dict,
+    tool: str,
+    *,
+    raw_text: str | None = None,
+    action: str = "install",
+    eol: str = "\n",
+) -> None:
+    if tool == "codex":
+        text = raw_text if raw_text is not None else _toml_text(data)
+        hint = (
+            f"remove {UNIENV_HOME} from writable_roots manually"
+            if action == "uninstall"
+            else f"add this snippet manually:\n{sandbox_profile('codex')}"
+        )
+        try:
+            parsed = tomllib.loads(text)
+        except ValueError as exc:
+            die(f"cannot safely edit {path} ({exc}); {hint}")
+        if parsed != data:
+            die(f"cannot safely update {path} without altering existing tables; {hint}")
+    else:
+        text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    if path.exists():
+        backup = path.with_name(path.name + f".unienv-backup-{_dt.datetime.now():%Y%m%d-%H%M%S-%f}")
+        shutil.copy2(path, backup)
+    _write_preserving_link_and_mode(path, text, eol=eol)
+
+
+def _sandbox_fields(tool: str) -> dict[tuple[str, ...], list[str]]:
+    root = str(UNIENV_HOME)
+    if tool == "codex":
+        return {("sandbox_workspace_write", "writable_roots"): [root]}
+    return {
+        ("permissions", "allow"): [f"Read(/{UNIENV_HOME.as_posix()}/**)"],
+        ("sandbox", "filesystem", "allowRead"): [root],
+        ("sandbox", "filesystem", "allowWrite"): [root],
+    }
+
+
+def _install_sandbox(path: Path, tool: str) -> bool:
+    raw, eol = _read_text_with_eol(path)
+    data = _sandbox_load(path, tool)
+    state_path, state = _sandbox_state()
+    key = str(path.resolve())
+    record = state.get(key, {"tool": tool, "added": {}, "created": [], "new_file": not path.exists()})
+    changed = False
+    for fields, additions in _sandbox_fields(tool).items():
+        parent = data
+        for index, field in enumerate(fields[:-1]):
+            if field not in parent:
+                parent[field] = {}
+                record["created"].append(list(fields[: index + 1]))
+            if not isinstance(parent[field], dict):
+                die(f"{path}: {'.'.join(fields[: index + 1])} must be a table/object")
+            parent = parent[field]
+        name = fields[-1]
+        if name not in parent:
+            parent[name] = []
+            record["created"].append(list(fields))
+        values = parent[name]
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            die(f"{path}: {'.'.join(fields)} must be a list of strings")
+        for item in additions:
+            if item not in values:
+                values.append(item)
+                record["added"].setdefault(".".join(fields), []).append(item)
+                changed = True
+    if not changed:
+        return False
+    raw_text = (
+        _edit_codex_sandbox_toml(raw, data["sandbox_workspace_write"]["writable_roots"]) if tool == "codex" else None
+    )
+    _sandbox_write(path, data, tool, raw_text=raw_text, action="install", eol=eol)
+    state[key] = record
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(state_path, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+    return True
+
+
+def _uninstall_sandbox() -> None:
+    try:
+        state_path, state = _sandbox_state()
+    except (Exception, SystemExit) as exc:
+        detail = "" if isinstance(exc, SystemExit) else f": {exc}"
+        warn(f"could not read sandbox state{detail}")
+        return
+    for key, record in list(state.items()):
+        path = Path(key)
+        try:
+            raw, eol = _read_text_with_eol(path)
+            data = _sandbox_load(path, record["tool"])
+            for dotted, items in record["added"].items():
+                fields = dotted.split(".")
+                parent = data
+                for field in fields[:-1]:
+                    parent = parent.get(field, {}) if isinstance(parent, dict) else {}
+                values = parent.get(fields[-1]) if isinstance(parent, dict) else None
+                if isinstance(values, list):
+                    parent[fields[-1]] = [v for v in values if v not in items]
+            for fields in sorted(record["created"], key=len, reverse=True):
+                parent = data
+                for field in fields[:-1]:
+                    parent = parent.get(field, {}) if isinstance(parent, dict) else {}
+                if isinstance(parent, dict) and parent.get(fields[-1]) in ({}, []):
+                    parent.pop(fields[-1], None)
+            if path.exists():
+                if record["new_file"] and not data:
+                    target = Path(os.path.realpath(path)) if path.is_symlink() else path
+                    if path.is_symlink():
+                        path.unlink()
+                    if target.exists():
+                        target.unlink()
+                else:
+                    raw_text = None
+                    if record["tool"] == "codex":
+                        sww = data.get("sandbox_workspace_write")
+                        desired_roots = sww.get("writable_roots") if isinstance(sww, dict) else None
+                        raw_text = _edit_codex_sandbox_toml(
+                            raw,
+                            desired_roots,
+                            remove_table_if_empty=["sandbox_workspace_write"] in record["created"],
+                        )
+                    _sandbox_write(path, data, record["tool"], raw_text=raw_text, action="uninstall", eol=eol)
+            del state[key]
+        except (Exception, SystemExit) as exc:
+            detail = "" if isinstance(exc, SystemExit) else f": {exc}"
+            warn(f"could not remove sandbox settings from {path}{detail}")
+    if state:
+        atomic_write(state_path, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+    elif state_path.exists():
+        state_path.unlink()
+
+
+def _install_claude_sandbox(path: Path) -> bool:
+    return _install_sandbox(path, "claude")
+
+
+def _install_codex_sandbox(path: Path) -> bool:
+    return _install_sandbox(path, "codex")
+
+
+def cmd_sandbox(args) -> int:
+    if args.action == "print":
+        tools = ("claude", "codex", "seatbelt") if args.tool == "all" else (args.tool,)
+        for tool in tools:
+            print(sandbox_profile(tool))
+        return 0
+    if args.tool not in ("claude", "codex", "all"):
+        die("sandbox install supports claude, codex, or all")
+    tools = ("claude", "codex") if args.tool == "all" else (args.tool,)
+    for tool in tools:
+        path = (
+            HOME / ".claude/settings.json"
+            if tool == "claude"
+            else Path(os.environ.get("CODEX_HOME", HOME / ".codex")) / "config.toml"
+        )
+        if args.tool == "all" and not path.parent.exists() and not which(tool):
+            info(f"  {tool}: skipped (not detected)")
+            continue
+        changed = _install_sandbox(path, tool)
+        info(f"  {tool}: {'updated' if changed else 'already configured'} ({path})")
+        if tool == "codex":
+            info("  Codex writable_roots applies in workspace-write mode; the current sandbox mode was not changed.")
     return 0
 
 
@@ -1876,6 +3480,31 @@ def cmd_du(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "_soffice-safe":
+        import tempfile
+
+        soffice = os.environ.get("UNIENV_SOFFICE") or libreoffice_path()
+        if not soffice:
+            warn("LibreOffice is not installed")
+            return 127
+        with tempfile.TemporaryDirectory(prefix="ue_lo_") as profile:
+            return run(
+                [
+                    soffice,
+                    "-env:UserInstallation=" + Path(profile).as_uri(),
+                    "--headless",
+                    "--invisible",
+                    "--norestore",
+                    "--nologo",
+                    "--nodefault",
+                    "--nolockcheck",
+                    *argv[1:],
+                ],
+                check=False,
+                quiet=True,
+            ).returncode
     p = argparse.ArgumentParser(
         prog="unienv",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1900,7 +3529,9 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.add_argument("--no-system", action="store_true", help="skip Homebrew/apt packages")
     s.add_argument("--no-wire", action="store_true", help="don't edit shell startup files")
     s.add_argument("--all-agents", action="store_true", help="write instruction files even for agents not detected")
-    s.add_argument("-y", "--yes", action="store_true", help="allow sudo apt-get on Linux")
+    s.add_argument(
+        "-y", "--yes", action="store_true", help="skip battery picker and allow sudo apt-get/dnf/pacman on Linux"
+    )
     s.set_defaults(fn=cmd_install)
 
     s = sub.add_parser("need", help="permanently add a missing package for every AI tool")
@@ -1911,6 +3542,15 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     g.add_argument("--cask", action="store_true", help="macOS app (Homebrew cask)")
     s.add_argument("-y", "--yes", action="store_true")
     s.set_defaults(fn=cmd_need)
+
+    s = sub.add_parser("remove", help="remove a package previously added with `unienv need`")
+    s.add_argument("packages", nargs="+")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--node", action="store_true", help="npm package")
+    g.add_argument("--bin", action="store_true", help="system tool (Homebrew formula / apt package)")
+    g.add_argument("--cask", action="store_true", help="macOS app (Homebrew cask)")
+    s.add_argument("-y", "--yes", action="store_true", help="also uninstall system packages via brew/apt")
+    s.set_defaults(fn=cmd_remove)
 
     s = sub.add_parser("upgrade", help="upgrade installed Python and Node packages with automatic rollback")
     s.add_argument("packages", nargs="*", help="specific packages to upgrade (default: all)")
@@ -1932,6 +3572,16 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.add_argument("--json", action="store_true", help="print manifest.json")
     s.set_defaults(fn=cmd_list)
 
+    s = sub.add_parser("export", help="export batteries, excludes and extras as portable TOML")
+    s.set_defaults(fn=cmd_export)
+
+    s = sub.add_parser("import", help="restore an environment exported with `unienv export`")
+    s.add_argument("file", help="path to exported TOML file (or '-' for stdin)")
+    s.add_argument("--no-system", action="store_true", help="skip Homebrew/apt packages")
+    s.add_argument("--no-wire", action="store_true", help="don't edit shell startup files")
+    s.add_argument("-y", "--yes", action="store_true", help="skip confirmation prompt and allow sudo apt-get on Linux")
+    s.set_defaults(fn=cmd_import)
+
     s = sub.add_parser("wire", help="(re)write shell startup blocks; --gui sets the macOS GUI PATH")
     s.add_argument("--gui", action="store_true", help="experimental: set launchd PATH for desktop apps")
     s.set_defaults(fn=cmd_wire)
@@ -1944,7 +3594,9 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.set_defaults(fn=cmd_status)
 
     s = sub.add_parser("update", help="download the latest UniEnv and re-install with it")
-    s.add_argument("--ref", default="main", help="branch or tag to install (default: main)")
+    s.add_argument("--ref", default=None, help="branch or tag to install (default: latest release, or main)")
+    s.add_argument("--sha256", default=None, help="expected SHA-256 checksum of the downloaded tarball")
+    s.add_argument("--check", action="store_true", help="check whether a newer UniEnv release is available")
     s.add_argument("--no-wire", action="store_true")
     s.set_defaults(fn=cmd_update)
 
@@ -1953,7 +3605,7 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s.add_argument(
         "--client",
         default="claude-desktop",
-        choices=["claude-desktop", "cursor", "all"],
+        choices=[*MCP_CLIENT_KEYS, "all"],
         help="which app to configure (default: claude-desktop)",
     )
     s.set_defaults(fn=cmd_mcp)
@@ -1961,14 +3613,25 @@ docs: https://github.com/rupeshbharambe24/unienv-ai""",
     s = sub.add_parser("path", help="print the UniEnv bin directory")
     s.set_defaults(fn=lambda a: print(BIN) or 0)
 
+    s = sub.add_parser("sandbox", help="print or install sandbox allow-rules for Claude Code, Codex, Gemini/Seatbelt")
+    s.add_argument("action", nargs="?", default="print", choices=["print", "install"])
+    s.add_argument(
+        "--tool",
+        default="all",
+        choices=["claude", "codex", "gemini", "seatbelt", "all"],
+        help="which tool profile to print or install (default: all)",
+    )
+    s.set_defaults(fn=cmd_sandbox)
+
     s = sub.add_parser("du", help="show disk usage of py, node, backups and total UNIENV_HOME")
     s.set_defaults(fn=cmd_du)
 
     args = p.parse_args(argv)
     mutating = (
-        args.cmd in ("install", "need", "sync", "uninstall")
+        args.cmd in ("install", "import", "need", "remove", "sync", "uninstall", "wire")
         or (args.cmd == "upgrade" and not args.dry_run)
         or (args.cmd == "doctor" and args.fix)
+        or (args.cmd == "sandbox" and args.action == "install")
     )
     try:
         with state_lock() if mutating else contextlib.nullcontext():

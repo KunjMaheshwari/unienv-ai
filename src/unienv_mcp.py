@@ -32,12 +32,22 @@ import tomllib
 from pathlib import Path
 
 SERVER_NAME = "unienv"
-SERVER_VERSION = "0.2.2"
+SERVER_VERSION = "0.3.0"
 PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]  # newest first
 
 HOME = Path.home()
 UNIENV_HOME = Path(os.environ.get("UNIENV_HOME", HOME / ".unienv")).expanduser()
 BIN = UNIENV_HOME / "bin"
+
+
+def _bin_cmd(name: str) -> str:
+    if sys.platform == "win32":
+        cmd = BIN / f"{name}.cmd"
+        if cmd.exists():
+            return str(cmd)
+    return str(BIN / name)
+
+
 MANIFEST_FILE = UNIENV_HOME / "manifest.json"
 RECIPES_DIR = Path(__file__).resolve().parent.parent / "recipes"
 
@@ -224,6 +234,16 @@ def tool_env() -> dict[str, str]:
     env.update(
         {"PATH": os.pathsep.join(path), "UNIENV_HOME": str(UNIENV_HOME), "PYTHONUNBUFFERED": "1", "MPLBACKEND": "Agg"}
     )
+    puppeteer_cache = UNIENV_HOME / "cache" / "puppeteer"
+    if "PUPPETEER_CACHE_DIR" in os.environ:
+        env["PUPPETEER_CACHE_DIR"] = os.environ["PUPPETEER_CACHE_DIR"]
+    elif puppeteer_cache.is_dir():
+        env["PUPPETEER_CACHE_DIR"] = str(puppeteer_cache)
+    browsers_dir = UNIENV_HOME / "browsers"
+    if "PLAYWRIGHT_BROWSERS_PATH" in os.environ:
+        env["PLAYWRIGHT_BROWSERS_PATH"] = os.environ["PLAYWRIGHT_BROWSERS_PATH"]
+    elif browsers_dir.is_dir():
+        env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir)
     tmp = os.environ.get("TMPDIR", "/tmp")
     if sys.platform == "darwin" and (tmp == "/tmp" or tmp.startswith("/tmp/")):
         tmp = "/private" + tmp  # Leptonica rewrites /tmp paths (see env.sh)
@@ -437,11 +457,44 @@ def cap(text: str, limit: int = MAX_OUTPUT) -> str:
     return text[:limit] + f"\n\n[… truncated {len(text) - limit:,} more characters]"
 
 
+_SNAPSHOT_SKIP_DIRS = {".git", "node_modules", ".venv", "__pycache__"}
+_SNAPSHOT_MAX_DEPTH = 3
+_SNAPSHOT_MAX_FILES = 2000
+_SNAPSHOT_MAX_DIRS = 500
+
+
 def snapshot(d: Path) -> dict[str, float]:
-    try:
-        return {p.name: p.stat().st_mtime for p in d.iterdir() if p.is_file()}
-    except OSError:
-        return {}
+    out: dict[str, float] = {}
+    visited_dirs = 0
+
+    def _walk(cur: Path, depth: int) -> None:
+        nonlocal visited_dirs
+        if len(out) >= _SNAPSHOT_MAX_FILES or visited_dirs >= _SNAPSHOT_MAX_DIRS:
+            return
+        visited_dirs += 1
+        try:
+            entries = sorted(cur.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return
+        for p in entries:
+            if len(out) >= _SNAPSHOT_MAX_FILES or visited_dirs >= _SNAPSHOT_MAX_DIRS:
+                return
+            name = p.name
+            if name in _SNAPSHOT_SKIP_DIRS or name.startswith("."):
+                continue
+            try:
+                if p.is_symlink():
+                    continue
+                if p.is_dir():
+                    if depth < _SNAPSHOT_MAX_DEPTH:
+                        _walk(p, depth + 1)
+                elif p.is_file():
+                    out[p.relative_to(d).as_posix()] = p.stat().st_mtime
+            except OSError:
+                continue
+
+    _walk(d, 0)
+    return out
 
 
 def changed_files(d: Path, before: dict[str, float]) -> list[str]:
@@ -518,7 +571,7 @@ def t_read_document(a: dict) -> str:
             raise ToolError(f"tesseract failed: {err.strip()[:500]}")
         return _with_images(cap(f"[OCR text of {path.name}]\n{out}", limit), imgs)
     code, out, err, _ = run(
-        [str(BIN / "ue-py"), *SAFE_PATH, "-m", "markitdown", str(path)], cwd=path.parent, timeout=180
+        [_bin_cmd("ue-py"), *SAFE_PATH, "-m", "markitdown", str(path)], cwd=path.parent, timeout=180
     )
     if code == 0 and out.strip():
         return cap(out, limit)
@@ -551,7 +604,7 @@ def t_convert_document(a: dict) -> str:
     out_dir.mkdir(parents=True, exist_ok=True)
     dest = free_name(out_dir / f"{src.stem}.{fmt}")
     ext = src.suffix.lower()
-    soffice = BIN / "soffice-safe"
+    soffice = Path(_bin_cmd("soffice-safe"))
 
     def via_soffice(input_path: Path, target_fmt: str) -> list[Path]:
         with tempfile.TemporaryDirectory(dir=tool_env()["TMPDIR"]) as tmp:
@@ -649,7 +702,7 @@ def t_run_python(a: dict) -> str | list[dict]:
         script = f.name
     try:
         code, out, err, secs = run(
-            [str(BIN / "ue-py"), *SAFE_PATH, script], cwd=cwd, timeout=a.get("timeout_s", DEFAULT_TIMEOUT)
+            [_bin_cmd("ue-py"), *SAFE_PATH, script], cwd=cwd, timeout=a.get("timeout_s", DEFAULT_TIMEOUT)
         )
     finally:
         os.unlink(script)
@@ -664,7 +717,7 @@ def t_run_python(a: dict) -> str | list[dict]:
 
 def allowed_tools() -> dict[str, str]:
     tools = {b: p for b, p in manifest().get("bins", {}).items() if p}
-    tools["ue-node"] = str(BIN / "ue-node")
+    tools["ue-node"] = _bin_cmd("ue-node")
     tools.pop("uv", None)  # environment management goes through install_package
     return tools
 
@@ -697,7 +750,7 @@ def t_install_package(a: dict) -> str:
     if not names or not all(re.fullmatch(r"[A-Za-z0-9@][A-Za-z0-9._\-/@\[\],<>=!~*^]*", n) for n in names):
         raise ToolError(f"invalid package name: {a['name']!r}")
     code, out, err, secs = run(
-        [str(BIN / "unienv"), "need", *flag, "--", *names], cwd=UNIENV_HOME, timeout=900, env=install_env()
+        [_bin_cmd("unienv"), "need", *flag, "--", *names], cwd=UNIENV_HOME, timeout=900, env=install_env()
     )
     text = (out + ("\n" + err if err.strip() else "")).strip()
     if code != 0:

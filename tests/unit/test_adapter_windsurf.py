@@ -5,9 +5,13 @@ import contextlib
 import importlib.util
 import io
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _isolation import isolated_home  # noqa: E402
 
 ROOT = Path(__file__).parents[2]
 spec = importlib.util.spec_from_file_location("unienv", ROOT / "src" / "unienv.py")
@@ -54,12 +58,7 @@ class WindsurfAdapterTests(unittest.TestCase):
             rules_path.write_text("# My Windsurf Rules\nAlways write tests.\n")
             manifest = self._manifest()
 
-            with (
-                patch.object(u, "HOME", home),
-                patch.object(u, "UNIENV_HOME", unienv_home),
-                patch.object(u, "AGENTS_COPY", unienv_home / "AGENTS.md"),
-                patch.object(u, "which", return_value=None),
-            ):
+            with isolated_home(u, home, unienv_home=unienv_home, shell_files=[]):
                 done = u.sync_agents(manifest, [])
                 self.assertEqual(done, ["Windsurf"])
                 self.assertEqual(
