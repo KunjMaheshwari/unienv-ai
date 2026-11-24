@@ -63,6 +63,8 @@ class HomebrewUpdateTests(unittest.TestCase):
         self.assertIn("dist/SHA256SUMS", script)
         self.assertNotIn("archive/refs/tags", script)
         self.assertIn("ruby -c dist/unienv.rb", script)
+        self.assertIn("rupeshbharambe24/homebrew-tap.git", workflow)
+        self.assertNotIn("homebrew-unienv", workflow)
 
         with tempfile.TemporaryDirectory() as tmp:
             work = pathlib.Path(tmp)
