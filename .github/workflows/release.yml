@@ -10,6 +10,8 @@ permissions:
 jobs:
   mcpb:
     runs-on: ubuntu-latest
+    env:
+      HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v7
       - name: Verify release tag matches version strings
@@ -42,12 +44,37 @@ jobs:
           mkdir -p dist
           git archive --format=tar.gz --prefix="unienv-ai-${GITHUB_REF_NAME}/" -o "dist/unienv-ai-${GITHUB_REF_NAME}.tar.gz" "$GITHUB_REF_NAME"
           (cd dist && sha256sum "unienv-ai-${GITHUB_REF_NAME}.tar.gz" unienv.mcpb > SHA256SUMS)
-      - name: Attach release assets and SHA256SUMS to the release
+      - name: Render Homebrew formula
+        run: |
+          TAR_NAME="unienv-ai-${GITHUB_REF_NAME}.tar.gz"
+          TAR_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${TAR_NAME}"
+          SHA256="$(awk -v f="$TAR_NAME" '$2 == f {print $1}' dist/SHA256SUMS)"
+          test -n "$SHA256"
+          sed -e "s|url \".*\"|url \"${TAR_URL}\"|" \
+              -e "s|sha256 \".*\"|sha256 \"${SHA256}\"|" \
+              Formula/unienv.rb > dist/unienv.rb
+          ruby -c dist/unienv.rb
+          grep -q '^  url "https://' dist/unienv.rb
+          grep -q '^  sha256 "[0-9a-f]\{64\}"' dist/unienv.rb
+      - name: Attach release assets, SHA256SUMS, and Formula to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" "dist/unienv-ai-${GITHUB_REF_NAME}.tar.gz" dist/unienv.mcpb dist/SHA256SUMS --clobber \
-            || gh release create "$GITHUB_REF_NAME" "dist/unienv-ai-${GITHUB_REF_NAME}.tar.gz" dist/unienv.mcpb dist/SHA256SUMS --generate-notes
+          gh release upload "$GITHUB_REF_NAME" "dist/unienv-ai-${GITHUB_REF_NAME}.tar.gz" dist/unienv.mcpb dist/SHA256SUMS dist/unienv.rb --clobber \
+            || gh release create "$GITHUB_REF_NAME" "dist/unienv-ai-${GITHUB_REF_NAME}.tar.gz" dist/unienv.mcpb dist/SHA256SUMS dist/unienv.rb --generate-notes
+      - name: Update Homebrew tap (when HOMEBREW_TAP_TOKEN is configured)
+        if: env.HAS_TAP_TOKEN == 'true'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/rupeshbharambe24/homebrew-tap.git" /tmp/homebrew-tap
+          mkdir -p /tmp/homebrew-tap/Formula
+          cp dist/unienv.rb /tmp/homebrew-tap/Formula/unienv.rb
+          cd /tmp/homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/unienv.rb
+          git diff --cached --quiet || (git commit -m "unienv ${GITHUB_REF_NAME}" && git push origin HEAD)
 
   docker:
     needs: mcpb

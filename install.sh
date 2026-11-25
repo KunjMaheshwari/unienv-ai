@@ -111,7 +111,7 @@ fi
 #    so `brew upgrade` or a broken shared env can't take the CLI down with it.
 say "Python 3.12 (uv-managed)"
 "$UV" python install 3.12 --quiet
-PY="$("$UV" python find 3.12 --managed-python)"
+PY="$("$UV" python find 3.12 --managed-python --system)"
 
 # 3. Put the CLI, recipes and templates into the prefix
 mkdir -p "$UNIENV_HOME"

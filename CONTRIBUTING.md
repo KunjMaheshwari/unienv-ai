@@ -119,6 +119,14 @@ Please link the official documentation for every path in your PR. Unverified pat
 - Add a line to the README tables if you add a battery or adapter, and a line under `[Unreleased]` in `CHANGELOG.md` for anything user-facing.
 - Found a security problem? Don't open a public issue or PR; see [SECURITY.md](SECURITY.md).
 
+## Homebrew Tap (Maintainer Setup)
+
+To enable automated Homebrew formula updates from `.github/workflows/release.yml` (allowing users to run `brew install rupeshbharambe24/tap/unienv`):
+
+1. Create the tap repository `rupeshbharambe24/homebrew-tap`.
+2. Create a fine-grained GitHub personal access token scoped **only** to `rupeshbharambe24/homebrew-tap` with **Contents: Read and write** permission.
+3. Save the token as the `HOMEBREW_TAP_TOKEN` repository secret in `rupeshbharambe24/unienv-ai`. When unset, the tap-update step is skipped automatically.
+
 ## Code of conduct
 
 This project follows the [Contributor Covenant 2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). Be kind and assume good intent.

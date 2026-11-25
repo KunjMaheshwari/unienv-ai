@@ -305,7 +305,6 @@ UniEnv is free and open source. If it saves you time, please **[give it a star o
 
 Thank you to everyone who has helped build UniEnv AI: [@bfs2021](https://github.com/bfs2021), [@SantanDon](https://github.com/SantanDon), [@CyberKun](https://github.com/CyberKun), [@sanjanamg0](https://github.com/sanjanamg0) and [@KunjMaheshwari](https://github.com/KunjMaheshwari). Want to see your name here? Pick an [issue](https://github.com/rupeshbharambe24/unienv-ai/labels/good%20first%20issue).
 
-
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Tools installed by recipes keep their own licenses (see each recipe's `license_note`).

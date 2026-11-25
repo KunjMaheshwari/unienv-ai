@@ -822,6 +822,13 @@ def install_node(packages: list[str], *, require_npm: bool = False) -> None:
 # ── generated files: shims, env.sh, manifest, agent files ───────────────────
 
 
+def _cli_script_path() -> Path:
+    """Return a stable script path across Homebrew upgrades (rewriting Cellar/<ver> to opt/unienv)."""
+    p = Path(__file__).resolve()
+    m = re.match(r"^(.+)/Cellar/unienv/[^/]+/libexec/(.+)$", p.as_posix())
+    return Path(f"{m.group(1)}/opt/unienv/libexec/{m.group(2)}") if m else p
+
+
 def prune_backups(keep: int = 10, min_age_days: int = 7) -> list[Path]:
     """Keep the `keep` most recent backup snapshots and any newer than `min_age_days`; delete older ones."""
     if not BACKUP_DIR.exists():
@@ -886,7 +893,7 @@ def write_shims() -> None:
     # the CLI itself: always run with the interpreter that is running us now
     # (a uv-managed 3.12, never Homebrew's python), falling back to uv python find
     cli = BIN / "unienv"
-    script = Path(__file__).resolve()
+    script = _cli_script_path()
     cli.write_text(
         "#!/bin/sh\n"
         f"PY={shlex.quote(sys.executable)}\n"
@@ -896,7 +903,7 @@ def write_shims() -> None:
         '    UV="$(command -v uv 2>/dev/null || true)"\n'
         "  fi\n"
         '  if [ -n "$UV" ] && [ -x "$UV" ]; then\n'
-        f'    PY="$("$UV" python find {PY_VERSION} --managed-python 2>/dev/null || true)"\n'
+        f'    PY="$("$UV" python find {PY_VERSION} --managed-python --system 2>/dev/null || true)"\n'
         "  fi\n"
         "fi\n"
         'if [ -z "$PY" ] || [ ! -x "$PY" ]; then\n'
@@ -2505,6 +2512,11 @@ def mcp_handshake(timeout: float = 15) -> tuple[bool, str, float]:
         return False, f"{type(e).__name__}: {e}", time.monotonic() - start
 
 
+def _is_homebrew_install() -> bool:
+    posix = Path(__file__).resolve().as_posix()
+    return "/Cellar/unienv/" in posix or "/opt/unienv/libexec/" in posix
+
+
 def _version_tuple(ver: str) -> tuple[int, ...]:
     cleaned = ver.lstrip("v").split("-", 1)[0]
     return tuple(int(p) if p.isdigit() else 0 for p in cleaned.split("."))
@@ -2600,6 +2612,10 @@ def cmd_update(args) -> int:
             info(f"A newer version is available: {latest} (installed: v{VERSION}). Run `unienv update`.")
         else:
             info(f"UniEnv v{VERSION} is up to date (latest: {latest}).")
+        return 0
+
+    if _is_homebrew_install():
+        info("UniEnv was installed via Homebrew; update with: brew upgrade unienv && unienv install")
         return 0
 
     share = UNIENV_HOME / "share"
